@@ -10,13 +10,13 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 
-// 全局记录当前选中的平台（默认空，由前端传来）
+// 当前选中的媒体平台（由前端设置，空值表示尚未选择）
 static TARGET_PLAYER: Mutex<String> = Mutex::new(String::new());
 
-// 记录上一次是否发现 JustSolo，只在“从无到有”的跳变时通知前端（避免轮询式重复触发）
+// 记录上一次是否发现 JustSolo，仅在“从无到有”的跳变时通知前端，避免轮询式重复触发
 static LAST_JUSTSOLO_FOUND: AtomicBool = AtomicBool::new(false);
 
-// 给前端调用的切换接口
+// 供前端调用：切换目标媒体平台
 #[command]
 pub fn set_target_player(player: String) {
     if let Ok(mut target) = TARGET_PLAYER.lock() {
@@ -24,7 +24,7 @@ pub fn set_target_player(player: String) {
     }
 }
 
-// 自动匹配你选择的软件
+// 根据前端选择的平台，匹配对应的系统媒体会话，返回会话及其应用包名
 fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSession, String)> {
     let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
         .ok()?
@@ -33,9 +33,9 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
 
     let sessions = manager.GetSessions().ok()?;
 
-    // 获取当前的目标（前端如果还没传，默认用 netease）
+    // 获取当前目标平台（前端未设置时默认 netease）
     let target = {
-        let guard = TARGET_PLAYER.lock().unwrap_or_else(|e| e.into_inner()); // 加入防中毒
+        let guard = TARGET_PLAYER.lock().unwrap_or_else(|e| e.into_inner()); // 锁中毒时用内部值兜底
         if guard.is_empty() {
             "netease".to_string()
         } else {
@@ -43,9 +43,9 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
         }
     };
 
-    // 通用模式优先匹配 JustSolo 逻辑
+    // 通用模式（other）：优先匹配 JustSolo
     if target == "other" {
-        // 第一轮遍历：优先寻找 JustSolo.JustSolo
+        // 第一轮：优先寻找 JustSolo 会话
         for session in manager.GetSessions().ok()? {
             if let Ok(app_id) = session.SourceAppUserModelId() {
                 let app_id_str = app_id.to_string().to_lowercase();
@@ -57,7 +57,7 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
                 }
             }
         }
-        // 第二轮遍历：如果没有找到 JustSolo，回退到原逻辑，直接返回第一个有效媒体会话
+        // 第二轮：未找到 JustSolo 时，回退返回第一个有效媒体会话
         for session in manager.GetSessions().ok()? {
             if let Ok(app_id) = session.SourceAppUserModelId() {
                 return Some((session, app_id.to_string().to_lowercase()));
@@ -66,7 +66,7 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
         return None;
     }
 
-    // 其他平台逻辑
+    // 指定平台：按包名匹配
     for session in sessions {
         if let Ok(app_id) = session.SourceAppUserModelId() {
             let app_id_str = app_id.to_string().to_lowercase();
@@ -75,19 +75,19 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
                 return None;
             }
 
-            // 网易云特殊一点，包名可能叫 cloudmusic 或 netease
+            // 网易云包名可能是 cloudmusic 或 netease
             if target == "netease"
                 && (app_id_str.contains("cloudmusic") || app_id_str.contains("netease"))
             {
                 return Some((session, app_id_str));
             }
-            // 落雪音乐：包名叫 cn.toside.music.desktop，用lx-music作为备用包名
+            // 落雪音乐：包名为 cn.toside.music.desktop，lx-music 作为备用包名
             else if target == "lx-music"
                 && (app_id_str.contains("cn.toside.music.desktop") || app_id_str.contains("lx-music"))
             {
                 return Some((session, app_id_str));
             }
-            // 其他软件直接用名字去系统进程列表里撞
+            // 其他平台：按包名包含目标平台名匹配
             else if target != "netease" && app_id_str.contains(&target) {
                 return Some((session, app_id_str));
             }
@@ -104,13 +104,13 @@ pub async fn fetch_netease_music_info(
     let (session, app_id_str) = match get_target_media_session() {
         Some(s) => s,
         None => {
-            // 没有任何媒体会话时，重置发现标志，保证 JustSolo 下次出现时能再次通知前端
+            // 无媒体会话时重置发现标志，保证 JustSolo 下次出现时能再次通知前端
             LAST_JUSTSOLO_FOUND.store(false, Ordering::Relaxed);
             return Ok(None);
         }
     };
 
-    // 后端刚在 SMTC 中发现 JustSolo（从无到有的跳变）时，通知前端发起 WS 连接/重连
+    // 后端在 SMTC 中首次发现 JustSolo（从无到有的跳变）时，通知前端发起 WS 连接/重连
     if app_id_str.contains("justsolo") {
         if !LAST_JUSTSOLO_FOUND.swap(true, Ordering::Relaxed) {
             let _ = app.emit("justsolo-discovered", ());
@@ -152,8 +152,8 @@ pub async fn fetch_netease_music_info(
     }
 
     let mut position_ms: i64 = 0;
-    let mut duration_ms: i64 = 0; // 新增：用于记录歌曲总时长
-    
+    let mut duration_ms: i64 = 0; // 歌曲总时长（毫秒）
+
     if title.contains("抖音") || title.contains("douyin") { // 识别到抖音
         return Ok(None);
     }
@@ -162,12 +162,12 @@ pub async fn fetch_netease_music_info(
         if let Ok(pos) = timeline.Position() {
             position_ms = pos.Duration / 10000;
 
-            // 提取准确的歌曲总时长
+            // 提取歌曲总时长
             if let Ok(end) = timeline.EndTime() {
                 duration_ms = end.Duration / 10000;
             }
 
-            // 补偿算法保持不变
+            // 播放中时，用当前时间补偿位置偏移
             if is_playing {
                 if let Ok(last_updated) = timeline.LastUpdatedTime() {
                     if let Ok(now) =
@@ -200,8 +200,7 @@ pub async fn fetch_netease_music_info(
         }
     }
 
-    // 返回值增加了一个 duration_ms 参数
-    // 标题、歌手、是否播放、当前位置、总时长、应用包名
+    // 返回：标题、歌手、是否播放、当前位置、总时长、应用包名
     Ok(Some((title, artist, is_playing, position_ms, duration_ms, app_id_str)))
 }
 
@@ -224,7 +223,7 @@ pub async fn control_system_media(action: String) -> Result<(), String> {
     Ok(())
 }
 
-// 纯手工轻量 Base64 编码器
+// 轻量 Base64 编码（避免为单处使用引入额外依赖）
 fn inline_base64_encode(input: &[u8]) -> String {
     const CHARSET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
@@ -254,7 +253,7 @@ fn inline_base64_encode(input: &[u8]) -> String {
     result
 }
 
-// 利用微软官方 SMTC API 直接把网易云的本地封面榨出来
+// 通过 SMTC API 读取当前媒体的本地封面，转为 base64 数据 URI
 fn get_smtc_thumbnail() -> Option<String> {
     use windows::Storage::Streams::{Buffer, DataReader, InputStreamOptions};
 
@@ -309,7 +308,7 @@ pub async fn get_random_cover_url(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(3);
 
-    // 1号赛道：Apple Music
+    // 封面源 1：Apple Music
     let tx_itunes = tx.clone();
     let client_itunes = client.clone();
     let query_itunes = format!("{} {}", song_name, artist_name);
@@ -333,7 +332,7 @@ pub async fn get_random_cover_url(
         }
     });
 
-    // 2号赛道：网易云 API
+    // 封面源 2：网易云 API
     let tx_netease = tx.clone();
     let client_netease = client.clone();
     let song_netease = song_name.clone();
@@ -359,6 +358,7 @@ pub async fn get_random_cover_url(
                     .pointer("/result/songs/0/al/picUrl")
                     .and_then(|v| v.as_str())
                 {
+                    // 跳过网易云默认占位封面（无专辑图时返回的固定 URL）
                     if !pic.is_empty() && pic != "http://p4.music.126.net/UeTuwE7pvjBpypWLudqukQ==/3135032972947607.jpg" {
                         let _ = tx_netease.send(pic.replace("http://", "https://") + "?param=300y300").await;
                     }
@@ -367,7 +367,7 @@ pub async fn get_random_cover_url(
         }
     });
 
-    // 3号赛道：Deezer API
+    // 封面源 3：Deezer API
     let tx_deezer = tx.clone();
     let client_deezer = client.clone();
     let song_deezer = song_name.clone();
@@ -541,7 +541,7 @@ async fn search_song_meta(
     let mut saved_title = String::new();
     let mut saved_artist = String::new();
 
-    // ENGINE 1: QQ MUSIC (极速国内优选源)
+    // 引擎 1：QQ 音乐（国内优选源）
     let qq_search_url = format!(
         "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={}&n=5&format=json",
         urlencoding::encode(&query)
@@ -640,7 +640,7 @@ async fn search_song_meta(
         }
     }
 
-    // ENGINE 2: NETEASE FALLBACK (网易云兜底)
+    // 引擎 2：网易云（兜底源）
     let fake_ip = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -760,7 +760,7 @@ async fn search_song_meta(
         }
     }
 
-    // ENGINE 3: LRCLIB (精确匹配，自带极高校验度)
+    // 引擎 3：LRCLIB（精确匹配，校验度高）
     let duration_sec = duration_ms / 1000;
     if duration_sec > 0 {
         let lrclib_url = format!(
@@ -839,7 +839,6 @@ async fn run_websocket_lyrics(url: String, app: AppHandle) -> Result<(), String>
         .await
         .map_err(|e| format!("WebSocket 连接失败: {}", e))?;
 
-    println!("[WebSocket 调试] 连接成功！开始实时接收歌词推送...");
     let _ = app.emit("websocket-status", true);
 
     let (mut sender, mut receiver) = ws_stream.split();
@@ -851,14 +850,11 @@ async fn run_websocket_lyrics(url: String, app: AppHandle) -> Result<(), String>
         .await
     {
         println!("[WebSocket 调试] 发送 hello 失败: {}", e);
-    } else {
-        println!("[WebSocket 调试] 已发送 hello 声明客户端名称");
     }
 
     while let Some(Ok(msg)) = receiver.next().await {
         if let Ok(text) = msg.to_text() {
-            // 如果解析 JSON 成功，正常发给前端；
-            // 如果解析失败（比如 JustSolo 发送的是纯文本格式），绝对不能丢弃！直接把原始文本发给前端！
+            // JSON 解析成功则转发结构化数据；解析失败（如 JustSolo 的纯文本）则原样转发文本
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
                 let _ = app.emit("websocket-lyrics", &payload);
             } else {
@@ -878,8 +874,6 @@ pub async fn start_websocket_lyrics(
     url: Option<String>,
 ) -> Result<(), String> {
     let ws_url = url.unwrap_or_else(|| "ws://127.0.0.1:47290/".to_string());
-
-    println!("[WebSocket 调试] 正在连接歌词服务器: {}", ws_url);
 
     let mut task_guard = state.ws_task.lock().await;
     if let Some(handle) = task_guard.take() {
