@@ -689,12 +689,10 @@ const fetchAndApplyCover = async (trackInfo: string, song: string, artist: strin
         return;
     }
     try {
-        console.log("尝试获取封面");
         const url = await invoke<string>('get_random_cover_url', { songName: song, artistName: artist, preferSmtc });
         // 期间已切到新内容，丢弃过期结果
         if (mySeq !== coverReqSeq) return;
         await applyCoverToState(trackInfo, url, onlyIfChanged);
-        console.log("获取封面成功");
     } catch (e) {
         // 仅当仍是当前请求且允许清空时，才清空封面（切歌时清空，恢复播放时保留现有封面）
         if (mySeq === coverReqSeq && clearOnError) {
@@ -770,10 +768,15 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
     }
 
     // 浏览器：先回退到默认应用图标，再尝试用 SMTC 本地封面覆盖
+    // 若浏览器已判定为播放音乐（拉到歌词），则直接走网络封面（歌词元数据更准，封面也以网络为准）
     if (isBrowser) {
         isSmtcCoverActive.value = false;
         coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
-        await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
+        if (isBrowserMusic.value) {
+            await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, true);
+        } else {
+            await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
+        }
         return true;
     }
 
@@ -1215,8 +1218,12 @@ const syncMusicStatus = async () => {
                 currentDurationMs.value = lastLyric.time + 8000;
             }
 
-            currentSongName.value = song;
-            currentArtistName.value = artist || t('unknownArtist');
+            // 浏览器已判定为播放音乐时，标题/歌手由 fetch_song_meta 提供（更准），
+            // 不再用 SMTC 的原始值（如"正在播放: 歌名 - 歌手" / "edge"）覆盖
+            if (!(currentIsBrowser.value && isBrowserMusic.value)) {
+                currentSongName.value = song;
+                currentArtistName.value = artist || t('unknownArtist');
+            }
             const newTrackInfo = artist ? `${song} - ${artist}` : song;
 
             if (currentBaseInfo.value !== newTrackInfo) {
@@ -1258,7 +1265,6 @@ const syncMusicStatus = async () => {
 
                 // 统一走集中决策函数：按应用类型分派封面策略（浏览器/PotPlayer/bilibili/JustSolo/其他）
                 applyCoverForApp(newTrackInfo, song, artist, app_id_str, false, true);
-                console.log("获取封面ing");
 
                 // 仅在 WS 不活跃时，发起 HTTP 网络歌词兜底（PotPlayer 不拉歌词，标题常驻）
                 // 切换 SMTC 应用后 WS 心跳可能仍属于旧应用，此时也立即用 HTTP 兜底，保证新歌歌词及时到位
@@ -1269,7 +1275,21 @@ const syncMusicStatus = async () => {
                                 if (lrc) {
                                     parsedLyrics.value = parseLrc(lrc);
                                     // 浏览器拉到歌词 → 判定为播放音乐（而非视频）
-                                    if (currentIsBrowser.value) isBrowserMusic.value = true;
+                                    if (currentIsBrowser.value) {
+                                        isBrowserMusic.value = true;
+                                        // 浏览器：用后端提取的标题/歌手覆盖 SMTC 提供的标题/歌手
+                                        invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
+                                            .then(([title, artist]) => {
+                                                if (title) {
+                                                    currentSongName.value = title;
+                                                    currentArtistName.value = artist || t('unknownArtist');
+                                                    fillCollapsedWithTrackInfo();
+                                                    // 用正确的歌名/歌手重新获取封面（此前 watch(isBrowserMusic) 用的是 SMTC 原始值）
+                                                    const trackInfo = artist ? `${title} - ${artist}` : title;
+                                                    applyCoverForApp(trackInfo, title, artist, currentAppIdStr.value, true, true);
+                                                }
+                                            }).catch(() => { });
+                                    }
                                     // 刚拉到歌词时，如果发现时长还是 0，立刻补救
                                     if (currentDurationMs.value <= 0 && parsedLyrics.value.length > 0) {
                                         const lastLyric = parsedLyrics.value[parsedLyrics.value.length - 1];
@@ -1381,6 +1401,15 @@ watch(isVideoLikeSource, () => {
 watch(isBrowserMusic, (now) => {
     if (currentIsBrowser.value) {
         currentIsVideoPlayer.value = !now;
+        // 浏览器判定为音乐后，封面改走网络获取（歌词元数据更准，封面也以网络为准）
+        if (now) {
+            const song = currentSongName.value;
+            const artist = currentArtistName.value;
+            const trackInfo = artist ? `${song} - ${artist}` : song;
+            if (trackInfo && song && song !== t('noSongPlaying')) {
+                applyCoverForApp(trackInfo, song, artist, currentAppIdStr.value, true, true);
+            }
+        }
     }
 });
 

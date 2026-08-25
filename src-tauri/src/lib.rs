@@ -502,6 +502,7 @@ pub fn run() {
             music_controller::get_random_cover_url,
             music_controller::get_smtc_cover,
             music_controller::fetch_netease_lyrics,
+            music_controller::fetch_song_meta,
             music_controller::start_websocket_lyrics,
             music_controller::stop_websocket_lyrics,
             toggle_fps_plugin,
