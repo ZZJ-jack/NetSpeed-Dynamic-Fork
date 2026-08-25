@@ -1110,6 +1110,7 @@ const syncMusicStatus = async () => {
                 parsedLyrics.value = [];
                 lyricQueue.value = [];
                 currentMatchedIndex = -1;
+                console.log('clear lyrics');
             }
 
             // 仅在 WS 不活跃时，使用 SMTC 的播放状态
@@ -1158,10 +1159,14 @@ const syncMusicStatus = async () => {
                 }
 
                 // 彻底清除上首歌的残留歌词状态和强制渲染队列
-                parsedLyrics.value = [];
-                lyricQueue.value = [];
-                currentMatchedIndex = -1;
-                renderQueue.length = 0;
+                // 注意：WS 活跃时不能清空，否则会覆盖 WS 刚发来的新歌 init 歌词，
+                // 且 WS 不会为同一首歌再发一次 init，导致歌词一直不显示、标题常驻
+                if (!isWsActive) {
+                    parsedLyrics.value = [];
+                    lyricQueue.value = [];
+                    currentMatchedIndex = -1;
+                    renderQueue.length = 0;
+                }
 
                 // 切歌立刻把折叠态文本更新为 "标题 - 歌手"，
                 fillCollapsedWithTrackInfo();
