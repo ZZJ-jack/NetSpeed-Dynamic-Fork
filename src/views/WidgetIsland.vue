@@ -1154,6 +1154,23 @@ watch(isPlaying, (now, prev) => {
     }
 });
 
+// 从 SMTC 的歌曲字符串中提取歌手：浏览器 SMTC 的 artist 字段常为 edge/chrome 占位，
+// 真实歌手嵌在 song 字符串里（形如 "正在播放: 歌名 - 歌手"），用于歌手缺失时兜底
+const extractArtistFromSmtc = (smtcSong: string) => {
+    let s = smtcSong.trim();
+    for (const prefix of ['正在播放: ', '正在播放：', 'Now Playing: ', 'Playing: ']) {
+        if (s.startsWith(prefix)) {
+            s = s.slice(prefix.length).trim();
+            break;
+        }
+    }
+    const idx = s.lastIndexOf(' - ');
+    if (idx > 0) {
+        return s.slice(idx + 3).trim();
+    }
+    return '';
+};
+
 // 核心同步函数：负责获取状态并智能降级
 const syncMusicStatus = async () => {
     try {
@@ -1281,12 +1298,16 @@ const syncMusicStatus = async () => {
                                         invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
                                             .then(([title, artist]) => {
                                                 if (title) {
+                                                    // 浏览器：优先采用 SMTC 歌曲字符串里提取的歌手（更贴近浏览器实际播放的元数据），
+                                                    // 仅当 SMTC 里没有歌手时才回退用 fetch_song_meta 返回的歌手
+                                                    let finalArtist = extractArtistFromSmtc(song);
+                                                    if (!finalArtist) finalArtist = artist;
                                                     currentSongName.value = title;
-                                                    currentArtistName.value = artist || t('unknownArtist');
+                                                    currentArtistName.value = finalArtist || t('unknownArtist');
                                                     fillCollapsedWithTrackInfo();
                                                     // 用正确的歌名/歌手重新获取封面（此前 watch(isBrowserMusic) 用的是 SMTC 原始值）
-                                                    const trackInfo = artist ? `${title} - ${artist}` : title;
-                                                    applyCoverForApp(trackInfo, title, artist, currentAppIdStr.value, true, true);
+                                                    const trackInfo = finalArtist ? `${title} - ${finalArtist}` : title;
+                                                    applyCoverForApp(trackInfo, title, finalArtist, currentAppIdStr.value, true, true);
                                                 }
                                             }).catch(() => { });
                                     }
