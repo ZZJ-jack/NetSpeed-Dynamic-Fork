@@ -186,34 +186,17 @@ pub async fn fetch_netease_music_info(
         }
     }
 
-    if app_id_str.contains("bilibili") { // 识别到哔哩哔哩
-        return Ok(Some((title, "bilibili".to_string(), is_playing, position_ms, duration_ms, app_id_str)));
-    }
-    
-    if app_id_str.contains("edge") { // 识别到 Edge 浏览器
-        if artist.is_empty() {
-            return Ok(Some((title, "edge".to_string(), is_playing, position_ms, duration_ms, app_id_str)));
-        }
-        else {
-            return Ok(Some((title, artist, is_playing, position_ms, duration_ms, app_id_str)));
-        }
-    }
-
-    if app_id_str.contains("chrome") { // 识别到 Chrome 浏览器
-        if artist.is_empty() {
-            return Ok(Some((title, "chrome".to_string(), is_playing, position_ms, duration_ms, app_id_str)));
-        }
-        else {
-            return Ok(Some((title, artist, is_playing, position_ms, duration_ms, app_id_str)));
-        }
-    }
-
-    if app_id_str.contains("potplayer") { // 识别到 PotPlayer
-        if artist.is_empty() {
-            return Ok(Some((title, "potplayer".to_string(), is_playing, position_ms, duration_ms, app_id_str)));
-        }
-        else {
-            return Ok(Some((title, artist, is_playing, position_ms, duration_ms, app_id_str)));
+    // 识别到特定应用：bilibili 固定用应用名作歌手；edge/chrome/potplayer 在歌手缺失时用应用名兜底
+    for app_name in ["bilibili", "edge", "chrome", "potplayer"] {
+        if app_id_str.contains(app_name) {
+            let fallback_artist = if app_name == "bilibili" {
+                "bilibili".to_string()
+            } else if artist.is_empty() {
+                app_name.to_string()
+            } else {
+                artist.clone()
+            };
+            return Ok(Some((title, fallback_artist, is_playing, position_ms, duration_ms, app_id_str)));
         }
     }
 
@@ -484,6 +467,35 @@ fn process_engine_result(
     None
 }
 
+// 从搜索结果中按 id 匹配找到歌曲，提取标题和歌手（歌手用 " / " 连接）
+// 供 QQ音乐 / 网易云两个引擎复用（两者字段名不同，用闭包参数化）
+fn extract_title_artist(
+    songs: &[serde_json::Value],
+    id_matches: impl Fn(&serde_json::Value) -> bool,
+    get_name: impl Fn(&serde_json::Value) -> Option<&str>,
+    get_singers: impl Fn(&serde_json::Value) -> Option<&Vec<serde_json::Value>>,
+) -> (String, String) {
+    let title = songs
+        .iter()
+        .find(|s| id_matches(s))
+        .and_then(|s| get_name(s))
+        .unwrap_or("")
+        .to_string();
+    let mut artist = String::new();
+    if let Some(singers) = songs
+        .iter()
+        .find(|s| id_matches(s))
+        .and_then(|s| get_singers(s))
+    {
+        let names: Vec<&str> = singers
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
+            .collect();
+        artist = names.join(" / ");
+    }
+    (title, artist)
+}
+
 // 统一搜索函数：依次尝试 QQ音乐 / 网易云 / LRCLIB
 // 歌词用第一个拿到歌词的引擎；标题/歌手优先用 LRC 元数据（[ti:]/[ar:]），
 // 若 LRC 没歌手则继续下一个引擎用搜索结果提取标题/歌手。
@@ -585,24 +597,12 @@ async fn search_song_meta(
                 }
 
                 if let Some(songmid) = best_songmid {
-                    let title = songs
-                        .iter()
-                        .find(|s| s.get("songmid").and_then(|v| v.as_str()) == Some(songmid.as_str()))
-                        .and_then(|s| s.get("songname").and_then(|v| v.as_str()))
-                        .unwrap_or("")
-                        .to_string();
-                    let mut artist = String::new();
-                    if let Some(singers) = songs
-                        .iter()
-                        .find(|s| s.get("songmid").and_then(|v| v.as_str()) == Some(songmid.as_str()))
-                        .and_then(|s| s.get("singer").and_then(|v| v.as_array()))
-                    {
-                        let names: Vec<&str> = singers
-                            .iter()
-                            .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
-                            .collect();
-                        artist = names.join(" / ");
-                    }
+                    let (title, artist) = extract_title_artist(
+                        songs,
+                        |s| s.get("songmid").and_then(|v| v.as_str()) == Some(songmid.as_str()),
+                        |s| s.get("songname").and_then(|v| v.as_str()),
+                        |s| s.get("singer").and_then(|v| v.as_array()),
+                    );
 
                     let qq_lyric_url = format!("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json&nobase64=1", songmid);
                     let mut lrc = String::new();
@@ -720,24 +720,12 @@ async fn search_song_meta(
                 }
 
                 if let Some(song_id) = best_song_id {
-                    let title = songs
-                        .iter()
-                        .find(|s| s.get("id").and_then(|v| v.as_i64()) == Some(song_id))
-                        .and_then(|s| s.get("name").and_then(|v| v.as_str()))
-                        .unwrap_or("")
-                        .to_string();
-                    let mut artist = String::new();
-                    if let Some(artists) = songs
-                        .iter()
-                        .find(|s| s.get("id").and_then(|v| v.as_i64()) == Some(song_id))
-                        .and_then(|s| s.get("artists").or(s.get("ar")).and_then(|v| v.as_array()))
-                    {
-                        let names: Vec<&str> = artists
-                            .iter()
-                            .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
-                            .collect();
-                        artist = names.join(" / ");
-                    }
+                    let (title, artist) = extract_title_artist(
+                        songs,
+                        |s| s.get("id").and_then(|v| v.as_i64()) == Some(song_id),
+                        |s| s.get("name").and_then(|v| v.as_str()),
+                        |s| s.get("artists").or(s.get("ar")).and_then(|v| v.as_array()),
+                    );
 
                     let lyric_url = format!(
                         "https://music.163.com/api/song/lyric?id={}&lv=-1&kv=-1&tv=-1",
