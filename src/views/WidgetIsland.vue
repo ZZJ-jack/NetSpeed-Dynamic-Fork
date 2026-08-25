@@ -852,6 +852,8 @@ let unlistenWs: (() => void) | null = null;
 // 用 SMTC 已获取到的 "标题 - 歌手" 立刻填充折叠态文本
 const fillCollapsedWithTrackInfo = () => {
     if (!currentSongName.value || currentSongName.value === t('noSongPlaying')) return;
+    // 标记当前显示的是 "标题 - 歌手" 占位文本，供歌词第一句恰好等于标题时强制接管显示
+    isTitlePlaceholder = true;
     // PotPlayer：直接用标题当常驻歌词显示，不再拼 "标题 - potplayer"
     if (isPotplayerSource.value) {
         setSafeTrackInfo(currentSongName.value);
@@ -1393,17 +1395,23 @@ watch(currentLanguage, () => {
 // 强制视觉渲染队列（绝对防闪烁/防空壳）
 const renderQueue: string[] = [];
 let isRendering = false;
+// 强制渲染下一句（用于歌词第一句恰好等于标题占位文本时，强制歌词接管显示）
+let forceRenderNext = false;
+// 当前显示的是否为 "标题 - 歌手" 占位文本（而非真实歌词）
+let isTitlePlaceholder = false;
 
-const setSafeTrackInfo = (text: string) => {
+const setSafeTrackInfo = (text: string, force = false) => {
     // 1. 终极过滤：剔除所有空白、零宽字符
     if (!text || text.replace(/[\s\u200B-\u200D\uFEFF\u3000]/g, '').length === 0) return;
 
     // 2. 防重判定：如果和当前屏幕上的一样，或者和队列排在最后的一样，拒收
-    if (text === currentTrackInfo.value && renderQueue.length === 0) return;
-    if (renderQueue.length > 0 && renderQueue[renderQueue.length - 1] === text) return;
+    //    force=true 时跳过防重（用于歌词第一句恰好等于标题占位文本时，强制歌词接管显示）
+    if (!force && text === currentTrackInfo.value && renderQueue.length === 0) return;
+    if (!force && renderQueue.length > 0 && renderQueue[renderQueue.length - 1] === text) return;
 
     // 3. 扔进强制渲染队列，绝不使用 clearTimeout 取消任何一句话！
     renderQueue.push(text);
+    if (force) forceRenderNext = true;
     drainRenderQueue();
 };
 
@@ -1411,14 +1419,21 @@ const drainRenderQueue = () => {
     if (isRendering || renderQueue.length === 0) return;
 
     const nextText = renderQueue.shift();
-    if (!nextText || nextText === currentTrackInfo.value) {
+    if (!nextText || (nextText === currentTrackInfo.value && !forceRenderNext)) {
+        forceRenderNext = false;
         drainRenderQueue();
         return;
     }
+    forceRenderNext = false;
 
     // 上锁！开始渲染新文字
     isRendering = true;
     currentTrackInfo.value = nextText;
+
+    // 渲染的是真实歌词时，标题占位标记失效
+    if (isPlaying.value && parsedLyrics.value.length > 0) {
+        isTitlePlaceholder = false;
+    }
 
     // 计算并赋予歌词扫描时长
     if (isPlaying.value && parsedLyrics.value.length > 0) {
@@ -3042,8 +3057,11 @@ onMounted(async () => {
                     // out-in 动画加起来需要 300ms，设定 800ms 能让文字至少稳定停留 0.5 秒
                     if (now - lastLyricChangeTime >= 800) {
                         const nextLyric = lyricQueue.value.shift();
-                        if (nextLyric && nextLyric !== currentTrackInfo.value) {
-                            setSafeTrackInfo(nextLyric);
+                        if (nextLyric) {
+                            // 歌词第一句恰好等于标题占位文本时，强制歌词接管显示
+                            // （否则会被 setSafeTrackInfo 的防重判定拒收，导致一直显示标题、歌词不出现）
+                            const force = isTitlePlaceholder && nextLyric === currentTrackInfo.value;
+                            setSafeTrackInfo(nextLyric, force);
                             lastLyricChangeTime = now;
                         }
                     }
