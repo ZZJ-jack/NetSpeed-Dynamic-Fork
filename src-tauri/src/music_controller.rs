@@ -428,22 +428,106 @@ pub async fn get_random_cover_url(
     }
 }
 
-#[command]
-pub async fn fetch_netease_lyrics(
-    song_name: String,
-    artist_name: String,
+// 从 LRC 元数据标签提取标题/歌手（[ti:标题] [ar:歌手]），取不到返回空字符串
+fn extract_lrc_meta(lrc: &str) -> (String, String) {
+    let title = lrc
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("[ti:").and_then(|rest| rest.strip_suffix(']'))
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let artist = lrc
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("[ar:").and_then(|rest| rest.strip_suffix(']'))
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    (title, artist)
+}
+
+// 单个引擎的搜索结果
+struct EngineResult {
+    title: String,
+    artist: String,
+    lrc: String,
+}
+
+// 处理单个引擎结果：保存第一个歌词；优先用 LRC 元数据（有歌手直接返回），
+// 否则记录搜索结果的标题/歌手作为兜底，返回 None 继续下一个引擎。
+fn process_engine_result(
+    result: &EngineResult,
+    saved_lrc: &mut Option<String>,
+    saved_title: &mut String,
+    saved_artist: &mut String,
+) -> Option<(String, String, String)> {
+    if !result.lrc.is_empty() && saved_lrc.is_none() {
+        *saved_lrc = Some(result.lrc.clone());
+    }
+    let (lrc_title, lrc_artist) = extract_lrc_meta(&result.lrc);
+    if !lrc_artist.is_empty() {
+        return Some((
+            lrc_title,
+            lrc_artist,
+            saved_lrc.clone().unwrap_or_else(|| result.lrc.clone()),
+        ));
+    }
+    if !result.title.is_empty() && !result.artist.is_empty() {
+        *saved_title = result.title.clone();
+        *saved_artist = result.artist.clone();
+    }
+    None
+}
+
+// 统一搜索函数：依次尝试 QQ音乐 / 网易云 / LRCLIB
+// 歌词用第一个拿到歌词的引擎；标题/歌手优先用 LRC 元数据（[ti:]/[ar:]），
+// 若 LRC 没歌手则继续下一个引擎用搜索结果提取标题/歌手。
+async fn search_song_meta(
+    song_name: &str,
+    artist_name: &str,
     duration_ms: i64,
-) -> Result<String, String> {
-    
+) -> Option<(String, String, String)> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
         .build()
-        .map_err(|e| e.to_string())?;
+        .ok()?;
 
     let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-    let query = format!("{} {}", song_name, artist_name);
-    let query_name_lower = song_name.to_lowercase();
-    let query_artist_lower = artist_name.to_lowercase(); // 新增：歌手小写比对
+
+    // 清洗搜索词：去掉 SMTC 常见的"正在播放: "前缀、" - "分隔符，以及 edge/chrome 等占位歌手
+    let mut clean_song = song_name.trim().to_string();
+    for prefix in ["正在播放: ", "正在播放：", "Now Playing: ", "Playing: "] {
+        if let Some(stripped) = clean_song.strip_prefix(prefix) {
+            clean_song = stripped.trim().to_string();
+            break;
+        }
+    }
+    // 若歌名形如 "歌名 - 歌手"，只取 " - " 前的歌名部分
+    if let Some(idx) = clean_song.find(" - ") {
+        clean_song = clean_song[..idx].trim().to_string();
+    }
+    let clean_artist = {
+        let a = artist_name.trim().to_lowercase();
+        if a.is_empty() || a == "edge" || a == "chrome" || a == "potplayer" || a == "bilibili" {
+            String::new()
+        } else {
+            artist_name.trim().to_string()
+        }
+    };
+
+    let query = format!("{} {}", clean_song, clean_artist);
+    let query_name_lower = clean_song.to_lowercase();
+    let query_artist_lower = clean_artist.to_lowercase();
+
+    // 保存第一个拿到的歌词，以及搜索结果的标题/歌手（作为 LRC 无歌手时的兜底）
+    let mut saved_lrc: Option<String> = None;
+    let mut saved_title = String::new();
+    let mut saved_artist = String::new();
 
     // ENGINE 1: QQ MUSIC (极速国内优选源)
     let qq_search_url = format!(
@@ -470,7 +554,6 @@ pub async fn fetch_netease_lyrics(
                         .unwrap_or("")
                         .to_lowercase();
 
-                    // 提取 QQ 音乐歌手名
                     let mut singer_name = String::new();
                     if let Some(singers) = song.get("singer").and_then(|v| v.as_array()) {
                         for s in singers {
@@ -486,15 +569,15 @@ pub async fn fetch_netease_lyrics(
                         || query_artist_lower.contains(&singer_name)
                         || query_artist_lower.is_empty();
 
-                    if let Some(mid) = songmid {
-                        if duration_ms > 0 {
-                            let diff = (interval * 1000 - duration_ms).abs();
-                            // 核心修复：必须名字匹配，且 (歌手匹配 或 时间误差极小)
-                            if name_match && (artist_match || diff <= 3000) {
-                                best_songmid = Some(mid.to_string());
-                                break;
-                            }
-                        } else if name_match && artist_match {
+                    let matched = if duration_ms > 0 {
+                        let diff = (interval * 1000 - duration_ms).abs();
+                        name_match && (artist_match || diff <= 3000)
+                    } else {
+                        name_match && artist_match
+                    };
+
+                    if matched {
+                        if let Some(mid) = songmid {
                             best_songmid = Some(mid.to_string());
                             break;
                         }
@@ -502,7 +585,27 @@ pub async fn fetch_netease_lyrics(
                 }
 
                 if let Some(songmid) = best_songmid {
+                    let title = songs
+                        .iter()
+                        .find(|s| s.get("songmid").and_then(|v| v.as_str()) == Some(songmid.as_str()))
+                        .and_then(|s| s.get("songname").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let mut artist = String::new();
+                    if let Some(singers) = songs
+                        .iter()
+                        .find(|s| s.get("songmid").and_then(|v| v.as_str()) == Some(songmid.as_str()))
+                        .and_then(|s| s.get("singer").and_then(|v| v.as_array()))
+                    {
+                        let names: Vec<&str> = singers
+                            .iter()
+                            .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
+                            .collect();
+                        artist = names.join(" / ");
+                    }
+
                     let qq_lyric_url = format!("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json&nobase64=1", songmid);
+                    let mut lrc = String::new();
                     if let Ok(lyric_resp) = client
                         .get(&qq_lyric_url)
                         .header("Referer", "https://y.qq.com/")
@@ -514,19 +617,23 @@ pub async fn fetch_netease_lyrics(
                             if let Some(lyric_text) =
                                 lyric_json.get("lyric").and_then(|v| v.as_str())
                             {
-                                let decoded = lyric_text
+                                lrc = lyric_text
                                     .replace("&#10;", "\n")
                                     .replace("&#13;", "\r")
                                     .replace("&#32;", " ")
                                     .replace("&#45;", "-")
                                     .replace("&#40;", "(")
                                     .replace("&#41;", ")");
-                                if !decoded.is_empty() {
-                                    println!("[网络歌词调试] 命中引擎 3: QQ音乐 API (已通过完美双重校验)");
-                                    return Ok(decoded);
-                                }
                             }
                         }
+                    }
+                    if let Some(result) = process_engine_result(
+                        &EngineResult { title, artist, lrc },
+                        &mut saved_lrc,
+                        &mut saved_title,
+                        &mut saved_artist,
+                    ) {
+                        return Some(result);
                     }
                 }
             }
@@ -577,7 +684,6 @@ pub async fn fetch_netease_lyrics(
                         .unwrap_or("")
                         .to_lowercase();
 
-                    // 提取网易云歌手名进行比对
                     let mut singer_name = String::new();
                     if let Some(artists) = song
                         .get("artists")
@@ -600,7 +706,6 @@ pub async fn fetch_netease_lyrics(
                     if let (Some(id), Some(song_dur)) = (id, song_duration) {
                         if duration_ms > 0 {
                             let diff = (song_dur - duration_ms).abs();
-                            // 核心修复：必须名字匹配，且 (歌手匹配 或 时间误差极小) 才算及格！
                             if name_match && (artist_match || diff <= 3000) {
                                 if diff < min_diff {
                                     min_diff = diff;
@@ -615,10 +720,30 @@ pub async fn fetch_netease_lyrics(
                 }
 
                 if let Some(song_id) = best_song_id {
+                    let title = songs
+                        .iter()
+                        .find(|s| s.get("id").and_then(|v| v.as_i64()) == Some(song_id))
+                        .and_then(|s| s.get("name").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let mut artist = String::new();
+                    if let Some(artists) = songs
+                        .iter()
+                        .find(|s| s.get("id").and_then(|v| v.as_i64()) == Some(song_id))
+                        .and_then(|s| s.get("artists").or(s.get("ar")).and_then(|v| v.as_array()))
+                    {
+                        let names: Vec<&str> = artists
+                            .iter()
+                            .filter_map(|a| a.get("name").and_then(|v| v.as_str()))
+                            .collect();
+                        artist = names.join(" / ");
+                    }
+
                     let lyric_url = format!(
                         "https://music.163.com/api/song/lyric?id={}&lv=-1&kv=-1&tv=-1",
                         song_id
                     );
+                    let mut lrc = String::new();
                     if let Ok(lyric_resp) = client
                         .get(&lyric_url)
                         .header("User-Agent", ua)
@@ -630,10 +755,17 @@ pub async fn fetch_netease_lyrics(
                             if let Some(lyric_text) =
                                 lyric_json.pointer("/lrc/lyric").and_then(|v| v.as_str())
                             {
-                                println!("[网络歌词调试] 命中引擎 2: 网易云 API 兜底 (已通过完美双重校验)");
-                                return Ok(lyric_text.to_string());
+                                lrc = lyric_text.to_string();
                             }
                         }
+                    }
+                    if let Some(result) = process_engine_result(
+                        &EngineResult { title, artist, lrc },
+                        &mut saved_lrc,
+                        &mut saved_title,
+                        &mut saved_artist,
+                    ) {
+                        return Some(result);
                     }
                 }
             }
@@ -645,26 +777,72 @@ pub async fn fetch_netease_lyrics(
     if duration_sec > 0 {
         let lrclib_url = format!(
             "https://lrclib.net/api/get?track_name={}&artist_name={}&duration={}",
-            urlencoding::encode(&song_name),
-            urlencoding::encode(&artist_name),
+            urlencoding::encode(&clean_song),
+            urlencoding::encode(&clean_artist),
             duration_sec
         );
 
         if let Ok(resp) = client.get(&lrclib_url).send().await {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
-                if let Some(synced_lyrics) = json.pointer("/syncedLyrics").and_then(|v| v.as_str())
-                {
-                    if !synced_lyrics.is_empty() {
-                        println!("[网络歌词调试] 命中引擎 1: LRCLIB API 精确匹配");
-                        return Ok(synced_lyrics.to_string());
-                    }
+                let title = json
+                    .pointer("/trackName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let artist = json
+                    .pointer("/artistName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let lrc = json
+                    .pointer("/syncedLyrics")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                // 最后一个引擎：直接返回。标题/歌手优先用前面引擎搜索到的（更准），
+                // 否则用 LRCLIB 的；歌词用第一个拿到的。
+                let final_lrc = saved_lrc.unwrap_or(lrc);
+                if !saved_title.is_empty() {
+                    return Some((saved_title, saved_artist, final_lrc));
                 }
+                return Some((title, artist, final_lrc));
             }
         }
     }
 
-    println!("[网络歌词调试] 失败：所有网络接口均未找到匹配歌词，或未通过双重校验");
-    Ok("".to_string())
+    // 兜底：用搜索结果的标题/歌手 + 第一个拿到的歌词
+    if let Some(lrc) = saved_lrc {
+        if !saved_title.is_empty() {
+            return Some((saved_title, saved_artist, lrc));
+        }
+    }
+
+    None
+}
+
+#[command]
+pub async fn fetch_netease_lyrics(
+    song_name: String,
+    artist_name: String,
+    duration_ms: i64,
+) -> Result<String, String> {
+    match search_song_meta(&song_name, &artist_name, duration_ms).await {
+        Some((_, _, lrc)) if !lrc.is_empty() => Ok(lrc),
+        _ => Ok("".to_string()),
+    }
+}
+
+// 根据歌名/歌手搜索，返回更准确的标题/歌手（只取这两个字段，用于浏览器歌词元数据缺失时兜底）
+#[command]
+pub async fn fetch_song_meta(
+    song_name: String,
+    artist_name: String,
+    duration_ms: i64,
+) -> Result<(String, String), String> {
+    match search_song_meta(&song_name, &artist_name, duration_ms).await {
+        Some((title, artist, _)) if !title.is_empty() => Ok((title, artist)),
+        _ => Err("未找到匹配歌曲元数据".to_string()),
+    }
 }
 
 // WebSocket 实时歌词推送
