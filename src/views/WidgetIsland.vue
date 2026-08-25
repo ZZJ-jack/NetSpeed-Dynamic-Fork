@@ -307,14 +307,14 @@ import { t, currentLanguage, type AppLanguage } from '../i18n';
 const isIslandVisible = ref(false);
 const isMenuOpen = ref(false);
 
-// 统一监听灵动岛显隐，无论因为什么原因出现/消失，都立刻向控制台汇报
+// 监听灵动岛显隐变化，同步状态给控制台
 watch(isIslandVisible, (newVal) => {
     emit('island-status-sync', { visible: newVal });
 });
 
 // 兜底保险：OS 窗口显隐必须严格跟随灵动岛状态。
 // 关闭 → 立即开启鼠标透传（点击穿透，不拦截下层窗口）；
-//         等离开动画结束后把窗口物理缩成 1×1，彻底点不到；
+//         等离开动画结束后把窗口物理缩成 1×1，彻底不可点击；
 // 开启 → 关闭透传并恢复窗口到正常尺寸（正常交互）。
 watch(isIslandVisible, (visible) => {
     const appWindow = getCurrentWindow();
@@ -371,7 +371,7 @@ let isProcessingToast = false;
 
 // 队列处理函数
 const processToastQueue = async () => {
-    // 如果正在处理，或者队列为空，则直接返回
+    // 正在处理或队列为空时直接返回
     if (isProcessingToast || toastQueue.value.length === 0) return;
 
     // 优先级判断：如果当前正在显示消息通知(最高优先级)，则挂起等待
@@ -404,7 +404,7 @@ watch(displaySysToast, (newVal) => {
         animateIslandSize(260, 42);
     } else {
         // 通知消失时，恢复到当前状态该有的尺寸
-        // （前提是没有被应用消息或音乐面板霸占）
+        // （前提是没有被应用消息或音乐面板占用）
         if (!isMsgActive.value && !isMusicExpanded.value && !isMusicExpanding.value) {
             const { w, h } = getBaseSize();
             animateIslandSize(w, h);
@@ -418,7 +418,7 @@ const showToast = (text: string, type: 'app' | 'sys' | 'battery-charge' | 'batte
     processToastQueue();
 };
 
-// 监听消息通知状态，一旦消息通知消失，立刻唤醒可能被挂起的操作通知队列
+// 监听消息通知状态，消息通知消失时唤醒可能被挂起的操作通知队列
 watch(isMsgActive, (newVal) => {
     if (!newVal) {
         processToastQueue();
@@ -449,7 +449,7 @@ const nsdLyricDelay = ref(Number(localStorage.getItem('nsd_lyric_delay')) || 0);
 // WS 歌词专属额外延迟（毫秒），调谐时只改这里
 const WS_LYRIC_DELAY_MS = 500;
 
-// 1. 瞬间判定当前是否处于大窗口状态
+// 1. 判定当前是否处于大窗口状态
 const isExpandedSize = computed(() => isMusicExpanded.value || isMsgActive.value);
 
 // 2. 外层容器：状态一变，立马切成目标圆角
@@ -495,24 +495,24 @@ const coreContentStyle = computed(() => {
 
 // 4. 沉浸模式背景层：智能规避黑边与遮挡，并绑定不透明度
 const coverglassStyle = computed<CSSProperties>(() => {
-    // 关键修复：把控制台传来的透明度转换成视觉 alpha 值
+    // 将控制台传来的透明度转换为视觉 alpha 值（gamma 校正）
     const linear = islandOpacity.value / 100;
     const alpha = Math.pow(linear, 1 / 2.2);
 
     if (isGlowBorderEnabled.value) {
-        // 当流光边框开启时：往内缩进 2px 给边框让路，并匹配内层圆角
+        // 流光边框开启时：内缩 2px 给边框让路，并匹配内层圆角
         const innerRadiusValue = Math.max(nsdBorderRadius.value - 2, 8);
         return {
             top: '2px', left: '2px', right: '2px', bottom: '2px',
             borderRadius: isExpandedSize.value ? '22px' : `${innerRadiusValue}px`,
-            opacity: alpha // 新增：将透明度应用到沉浸背景层
+            opacity: alpha // 将透明度应用到沉浸背景层
         };
     }
-    // 当流光边框关闭时：无死角铺满整个灵动岛，并匹配外层大圆角
+    // 流光边框关闭时：铺满整个灵动岛，并匹配外层大圆角
     return {
         top: '0', left: '0', right: '0', bottom: '0',
         borderRadius: isExpandedSize.value ? '24px' : `${nsdBorderRadius.value}px`,
-        opacity: alpha // 新增：将透明度应用到沉浸背景层
+        opacity: alpha // 将透明度应用到沉浸背景层
     };
 });
 
@@ -536,7 +536,7 @@ const isMusicCtlEnabled = ref(localStorage.getItem('nsd_music_ctrl') === 'true')
 const isPlaying = ref(false);
 // 歌词显示
 const parsedLyrics = ref<{ time: number; text: string }[]>([]);
-const currentBaseInfo = ref(''); // 用于在没有歌词时兜底显示 "歌名 - 歌手"
+const currentBaseInfo = ref(''); // 无歌词时兜底显示 "歌名 - 歌手"
 // 歌词时间推算专用变量
 const localPositionMs = ref(0);
 let lastTickTime = performance.now();
@@ -591,7 +591,7 @@ const parseLrc = (lrcStr: string) => {
 
 // 流光边框默认状态完全镜像音乐控制器（只要音乐控制器开着它就开，关了就一起关）
 const isGlowBorderEnabled = ref(localStorage.getItem('nsd_glow_border') === 'true');
-// 监听流光边框状态，改变立刻通知托盘
+// 监听流光边框状态变化，同步托盘菜单的勾选状态
 watch(isGlowBorderEnabled, (val) => invoke('sync_tray_menu', { glow: val }));
 
 // 律动频谱
@@ -637,7 +637,7 @@ const bakeBlurImage = (url: string): Promise<string> => {
         if (url.startsWith('http')) img.crossOrigin = 'anonymous';
         img.onload = () => {
             const canvas = document.createElement('canvas');
-            canvas.width = 120; // 降低物理分辨率榨干性能
+            canvas.width = 120; // 降低物理分辨率以提升性能
             canvas.height = 120;
             const ctx = canvas.getContext('2d');
             if (!ctx) return resolve(url);
@@ -756,9 +756,8 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
     const isBilibili = appIdStr.includes("bilibili");
     const isJustSolo = appIdStr.includes("justsolo");
 
-    // PotPlayer 视频模式：直接用 logo，清空所有封面缓存，防止 coverglass 背景残留上一首歌
+    // PotPlayer 视频模式：使用 logo，清空所有封面缓存，防止 coverglass 背景残留上一首歌
     if (isPotplayerVideo) {
-        console.log("直接使用PotPlayerLogo");
         coverUrl.value = potplayerLogo;
         blurredCoverUrl.value = '';
         isSmtcCoverActive.value = false;
@@ -819,7 +818,7 @@ const checkAndToggleFpsPlugin = () => {
     const needFps = enableFps.value || (enableCustomDisplay.value && customSlots.value.includes('fps'));
     invoke('toggle_fps_plugin', { enable: needFps }).catch((err) => {
         console.error('FPS 插件启动失败:', err);
-        // 👈 检测到 FPS 插件不存在时，前端就地退出 FPS 显示，避免灵动岛停留在 FPS 模式
+        // FPS 插件不存在时，前端就地退出 FPS 显示，避免灵动岛停留在 FPS 模式
         enableFps.value = false;
         localStorage.setItem('nsd_fps_monitor', 'false');
         if (customSlots.value.includes('fps')) {
@@ -852,7 +851,7 @@ let unlistenJustSolo: (() => void) | null = null;
 // WebSocket 实时歌词监听
 let unlistenWs: (() => void) | null = null;
 
-// 用 SMTC 已获取到的 "标题 - 歌手" 立刻填充折叠态文本
+// 用 SMTC 已获取到的 "标题 - 歌手" 填充折叠态文本
 const fillCollapsedWithTrackInfo = () => {
     if (!currentSongName.value || currentSongName.value === t('noSongPlaying')) return;
     // 标记当前显示的是 "标题 - 歌手" 占位文本，供歌词第一句恰好等于标题时强制接管显示
@@ -887,8 +886,8 @@ const initWebSocket = async () => {
                 isWsConnected.value = event.payload;
                 isWsConnecting.value = false;
                 if (isWsConnected.value) {
-                    parsedLyrics.value = []; // 连上 WS 后，立刻清空可能残存的网络歌词，防止打架
-                    // 连上 WS 就立刻用 SMTC 已拿到的 "标题 - 歌手" 填充折叠态文本（歌词接管前先兜底显示）
+                    parsedLyrics.value = []; // 连上 WS 后清空可能残存的网络歌词，避免冲突
+                    // 连上 WS 后用 SMTC 已拿到的 "标题 - 歌手" 填充折叠态文本（歌词接管前先兜底显示）
                     fillCollapsedWithTrackInfo();
                 } else {
                     // 断开/连接失败时重置一次性标志，允许下次检测到 JustSolo 时重试连接
@@ -920,7 +919,7 @@ const initWebSocket = async () => {
                         }));
                         lyricQueue.value = [];
                         currentMatchedIndex = -1;
-                        lastLyricChangeTime = 0; // 重置时间锁，允许立刻显示第一句歌词
+                        lastLyricChangeTime = 0; // 重置时间锁，允许立即显示第一句歌词
 
                         // 浏览器收到完整歌词 → 判定为播放音乐（而非视频）
                         if (currentIsBrowser.value) isBrowserMusic.value = true;
@@ -1053,7 +1052,7 @@ const shouldShowInQuietMode = computed(() =>
 watch(shouldShowInQuietMode, async (newVal) => {
     if (isMsgModeEnabled.value) {
         if (newVal && !isIslandVisible.value) {
-            // 条件满足且当前隐藏时，立刻呼出灵动岛
+            // 条件满足且当前隐藏时，呼出灵动岛
             await invoke('show_window_no_activate', { label: 'widget' });
             isIslandVisible.value = true;
         } else if (!newVal && isIslandVisible.value) {
@@ -1068,7 +1067,7 @@ watch(shouldShowInQuietMode, async (newVal) => {
 });
 
 // 沉浸背景的独立存活逻辑
-// 只要媒体活跃且没被“消息弹窗(Msg)”霸占，背景就一直存在，即使此时正在显示系统通知(Toast)
+// 只要媒体活跃且未被消息弹窗占用，背景就一直存在，即使正在显示系统通知
 const showCoverglassBg = computed(() => {
     return islandTheme.value === 'coverglass' &&
         isMusicCtlEnabled.value &&
@@ -1087,7 +1086,7 @@ const getBaseSize = () => {
 
 // 监听内容切换，触发丝滑动画过渡
 watch([displaySpeed, displayMusic, displayResource, displayFps], () => {
-    // 只有在没有被临时弹窗（消息、音乐展开）霸占时，才执行基础大小切换
+    // 仅在未被临时弹窗（消息、音乐展开）占用时，才执行基础大小切换
     if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
         const { w, h } = getBaseSize();
         animateIslandSize(w, h);
@@ -1100,7 +1099,7 @@ const showSpectrumIndicator = computed(() => {
 });
 
 const togglePlay = async () => {
-    // 1. 前端先立刻切换图标，给用户极速的视觉反馈
+    // 1. 前端先切换图标，给用户即时的视觉反馈
     isPlaying.value = !isPlaying.value;
 
     // 2. 发送指令给 Rust 和 SMTC
@@ -1228,9 +1227,9 @@ const syncMusicStatus = async () => {
 
             // 拦截无效的时长，并智能利用歌词反推
             if (durationMs > 0) {
-                currentDurationMs.value = durationMs; // 系统给的准，直接用
+                currentDurationMs.value = durationMs; // 系统给的时长，直接使用
             } else if (parsedLyrics.value.length > 0) {
-                // 系统没给时长，但我们有歌词！直接拿最后一句歌词时间 + 8秒尾奏
+                // 系统未提供时长但有歌词：用最后一句歌词时间 + 8 秒尾奏估算
                 const lastLyric = parsedLyrics.value[parsedLyrics.value.length - 1];
                 currentDurationMs.value = lastLyric.time + 8000;
             }
@@ -1265,7 +1264,7 @@ const syncMusicStatus = async () => {
                     renderQueue.length = 0;
                 }
 
-                // 切歌立刻把折叠态文本更新为 "标题 - 歌手"，
+                // 切歌时立即把折叠态文本更新为 "标题 - 歌手"
                 fillCollapsedWithTrackInfo();
 
                 // PotPlayer：不做歌词匹配，清空可能残留的歌词队列，标题常驻显示
@@ -1311,7 +1310,7 @@ const syncMusicStatus = async () => {
                                                 }
                                             }).catch(() => { });
                                     }
-                                    // 刚拉到歌词时，如果发现时长还是 0，立刻补救
+                                    // 刚拉到歌词时，若时长仍为 0，用歌词反推补救
                                     if (currentDurationMs.value <= 0 && parsedLyrics.value.length > 0) {
                                         const lastLyric = parsedLyrics.value[parsedLyrics.value.length - 1];
                                         currentDurationMs.value = lastLyric.time + 8000;
@@ -1384,7 +1383,7 @@ const getConnectedAppName = (appId: string) => {
     if (id.includes('spotify')) return 'Spotify';
     if (id.includes('qqmusic')) return 'QQ音乐';
     if (id.includes('justsolo')) return 'JustSolo';
-    // 兜底：去掉 .exe 后缀后直接展示包名
+    // 兜底：去掉 .exe 后缀后展示包名
     return id.replace(/\.exe$/i, '');
 };
 
@@ -1508,8 +1507,7 @@ const drainRenderQueue = () => {
         }, 100);
     });
 
-    // 4. 动画护城河：强制锁死 350ms！
-    // 必须等 Vue 的 out-in 动画完美落幕，才允许渲染下一句！
+    // 4. 动画锁：强制等待 350ms，确保 Vue 的 out-in 动画结束后才渲染下一句
     setTimeout(() => {
         isRendering = false;
         drainRenderQueue();
@@ -2019,7 +2017,7 @@ const onEnter = (el: Element, done: () => void) => {
     HTMLElement.style.transformOrigin = 'center top';
     let start = performance.now();
 
-    // 👈 顺应前端参数调整出场缩放的物理曲线
+    // 根据用户选择的弹性风格，调整出场缩放的物理曲线参数
     const isStiff = nsdSpringStyle.value === 'stiff';
     const freq = isStiff ? 3.2 : 2.0;
     const decay = isStiff ? 18.0 : 10.5;
@@ -2083,11 +2081,11 @@ const onLeave = (el: Element, done: () => void) => {
     };
     requestAnimationFrame(animate);
 
-    // 终极防休眠保险：就算系统把 requestAnimationFrame 彻底冻结了
-    // 只要时间一到（350ms），强行结束动画并彻底隐藏物理窗口！
+    // 防休眠保险：即使系统冻结了 requestAnimationFrame，
+    // 时间一到（350ms）也强制结束动画并隐藏物理窗口
     setTimeout(() => {
         if (!isFinished) {
-            // 兜底：如果卡死了，强行把透明度归零，防止残留像素拦截鼠标
+            // 兜底：若动画卡死，强制将透明度归零，防止残留像素拦截鼠标
             HTMLElement.style.opacity = '0';
             finishAnimation();
         }
@@ -2110,12 +2108,12 @@ const handleMouseDown = (event: MouseEvent) => {
 const handleMouseMove = async (event: MouseEvent) => {
     if (!isMouseDown) return;
 
-    // 1. 全局动画锁：任何变形动画期间，绝对禁止拖拽
+    // 1. 全局动画锁：任何变形动画期间禁止拖拽
     if (isSizeAnimating) return;
 
-    // 2. 状态锁：音乐展开、消息通知、系统提示期间，统统禁止拖拽！
+    // 2. 状态锁：音乐展开、消息通知、系统提示期间禁止拖拽
     if (isMusicExpanded.value || isMusicExpanding.value || isMsgActive.value || displaySysToast.value) {
-        // 发现企图拖拽，立刻打断施法
+        // 检测到拖拽意图时取消拖拽
         isMouseDown = false;
         return;
     }
@@ -2243,12 +2241,12 @@ const handleRightClick = async (event: MouseEvent) => {
 
     // 4. 弹出菜单
     try {
-        isMenuOpen.value = true; // 👈 弹出前，告诉系统菜单打开了
+        isMenuOpen.value = true; // 弹出前标记菜单已打开
         await menu.popup(position);
     } catch (error) {
         console.error('菜单弹出失败:', error);
     } finally {
-        isMenuOpen.value = false; // 👈 无论用户是点击了菜单，还是点空白处取消了，都会瞬间恢复置顶状态
+        isMenuOpen.value = false; // 无论点击菜单项还是取消，都恢复置顶状态
     }
 };
 
@@ -2310,12 +2308,12 @@ let positionResetAt = 0;
 // 在顶部声明缩放变量
 const appScale = ref(Number(localStorage.getItem('nsd_app_scale')) || 1.0);
 
-// 监听缩放变化，直接修改 html 根节点的 zoom，这是 Webkit 渲染最完美的缩放方式
+// 监听缩放变化，直接修改 html 根节点的 zoom（Webkit 渲染最完美的缩放方式）
 watch(appScale, (newScale) => {
     (document.documentElement.style as any).zoom = newScale;
 }, { immediate: true });
 
-// 灵动岛核心代码！（完美防漂移+防裁切+防打断抖动）
+// 灵动岛尺寸动画核心（防漂移、防裁切、防打断抖动）
 const animateIslandSize = async (targetWidth: number, targetHeight: number) => {
     const myRequest = ++latestAnimationRequest;
     try {
@@ -2323,7 +2321,7 @@ const animateIslandSize = async (targetWidth: number, targetHeight: number) => {
         const finalWidth = targetWidth * appScale.value;
         const finalHeight = targetHeight * appScale.value;
 
-        // 1. 触发形变前：立刻上锁
+        // 1. 触发形变前上锁
         isSizeAnimating = true;
         if (sizeAnimTimer) clearTimeout(sizeAnimTimer);
 
@@ -2347,8 +2345,8 @@ const animateIslandSize = async (targetWidth: number, targetHeight: number) => {
         await invoke('start_island_animation', {
             startWidth: realStartW,
             startHeight: realStartH,
-            targetWidth: finalWidth,    // 👈 传给 Rust 放大后的目标宽度
-            targetHeight: finalHeight,  // 👈 传给 Rust 放大后的目标高度
+            targetWidth: finalWidth,    // 传给 Rust 放大后的目标宽度
+            targetHeight: finalHeight,  // 传给 Rust 放大后的目标高度
             springStyle: nsdSpringStyle.value
         });
     } catch (err) {
@@ -2397,21 +2395,21 @@ const expandMusic = (e: MouseEvent) => {
 
     isMusicExpanding.value = true;
     isPendingCollapse = false;  // 重置待办任务
-    isAnimationLocked = true;   // ⚡ 上锁！宣布进入神圣不可侵犯的展开周期
+    isAnimationLocked = true;   // 锁定动画，防止展开期间被其他操作打断
 
     animateIslandSize(nsdBaseWidth.value + 95, nsdBaseHeight.value + 4);
 
-    // 2. 延迟 120 毫秒后，打断缩小，直接猛烈展开
+    // 2. 延迟 120 毫秒后，打断缩小，直接展开
     musicExpandAnimTimer = window.setTimeout(() => {
         isMusicExpanded.value = true;
         isMusicExpanding.value = false;
         animateIslandSize(nsdMusicExpandedWidth.value, 135);
 
-        // 3. 根据 Rust 端的弹簧衰减频率，约 400ms 后动画彻底结束，此时解锁
+        // 3. 根据 Rust 端的弹簧衰减频率，约 400ms 后动画结束，此时解锁
         setTimeout(() => {
             isAnimationLocked = false;
 
-            // 检查：如果在展开的这 520ms 里，用户鼠标已经移走了，那就立刻补发收缩命令！
+            // 检查：若展开期间用户鼠标已移走，则补发收缩命令
             if (isPendingCollapse) {
                 isPendingCollapse = false;
                 collapseMusic();
@@ -2420,27 +2418,27 @@ const expandMusic = (e: MouseEvent) => {
     }, 120);
 };
 
-// 鼠标离开灵动岛时：立刻收缩！
+// 鼠标离开灵动岛时：收缩音乐岛
 const handleMouseLeave = () => {
     if (!isMusicExpanded.value && !isMusicExpanding.value) return;
 
-    // 直接呼叫收缩。如果锁着，collapseMusic 会自动把它记到账上稍后执行
+    // 直接呼叫收缩；若动画锁着，collapseMusic 会记录待办稍后执行
     collapseMusic();
 };
 
-// 鼠标重新移入灵动岛时：立刻打断收缩企图
+// 鼠标重新移入灵动岛时：取消待执行的收缩
 const handleMouseEnter = () => {
-    // 如果之前移出留下了收缩案底，但动画还没播完鼠标又回来了，直接取消这个案底
+    // 若之前移出留下了收缩待办，但动画未播完鼠标又回来，则取消该待办
     isPendingCollapse = false;
 };
 
 watch(displayMusic, (newVal: boolean) => {
     if (!newVal) {
-        collapseMusic(); // 一旦音乐岛被隐藏（不管是因为轮换还是手动关了），立刻收缩
+        collapseMusic(); // 音乐岛被隐藏（轮换或手动关闭）时立即收缩
     }
 });
 
-// 引入你的默认图标作为兜底
+// 引入默认图标作为兜底
 import defaultLogo from '../assets/logo.png';
 const currentMsgIcon = ref(defaultLogo);
 
@@ -2596,7 +2594,7 @@ onMounted(async () => {
         }
     });
 
-    // 监听 Rust 底层发来的硬核资源数据
+    // 监听 Rust 底层发来的资源数据
     await listen<{ cpu: number, ram: number }>('resource-event', (event) => {
         cpuUsage.value = event.payload.cpu;
         ramUsage.value = event.payload.ram;
@@ -2640,7 +2638,7 @@ onMounted(async () => {
     await listen<{ enabled: boolean }>('control-msg-mode', async (event) => {
         isMsgModeEnabled.value = event.payload.enabled;
         if (isMsgModeEnabled.value) {
-            // 开启静默模式时：如果没有活跃事件，立刻隐藏；如果有，保持显示
+            // 静默模式开启时：无活跃事件则隐藏，有则保持显示
             if (!shouldShowInQuietMode.value && isIslandVisible.value) {
                 isIslandVisible.value = false;
             } else if (shouldShowInQuietMode.value && !isIslandVisible.value) {
@@ -2648,7 +2646,7 @@ onMounted(async () => {
                 isIslandVisible.value = true;
             }
         } else {
-            // 关闭静默模式时，立刻恢复常驻显示
+            // 静默模式关闭时，恢复常驻显示
             await invoke('show_window_no_activate', { label: 'widget' });
             isIslandVisible.value = true;
         }
@@ -2667,19 +2665,18 @@ onMounted(async () => {
     await listen<boolean>('fullscreen-changed', async (event) => {
         const isFullscreen = event.payload;
 
-        // 如果没开这个功能，直接无视
+        // 未开启该功能时直接忽略
         if (!isAutoHideEnabled.value) return;
 
         if (isFullscreen) {
-            // 检测到全屏：如果灵动岛当前是显示的，把它收起来，并做个案底
+            // 检测到全屏：若灵动岛当前显示，则收起并记录状态
             if (isIslandVisible.value) {
                 wasVisibleBeforeFullscreen = true;
 
-                // 【核心修复：听你的，直接物理拔管！】
-                // 瞬间让操作系统干掉这个窗口，绝不等待任何 Vue 动画
+                // 直接隐藏窗口，不等待 Vue 动画，确保全屏时立即消失
                 getCurrentWindow().hide().catch(() => { });
 
-                // 同步 Vue 状态（虽然会触发 onLeave，但物理窗口已经没了，不会有幽灵残留）
+                // 同步 Vue 状态（虽会触发 onLeave，但物理窗口已隐藏，不会残留）
                 isIslandVisible.value = false;
             }
         } else {
@@ -2980,7 +2977,7 @@ onMounted(async () => {
                 msgTitle.value = (res.title && res.title !== res.app_name) ? res.title : t('newNotification');
                 // 单独把程序名存起来
                 msgAppName.value = res.app_name;
-                // 内容兜底逻辑保持不变
+                // 消息正文兜底：无正文时用标题（标题与应用名相同时用通用文案）
                 msgBody.value = res.body || (res.title === res.app_name ? t('receivedNotification') : res.title);
 
                 currentMsgIcon.value = getAppIcon(res.app_name);

@@ -571,7 +571,7 @@ const togglePage = () => {
 const isChecking = ref(false);
 const hasNewVersion = ref(false);
 
-// 监听状态，一旦改变立刻通知托盘打勾/取消打勾
+// 监听状态变化，同步托盘菜单的勾选状态
 watch(isWidgetVisible, (val) => invoke('sync_tray_menu', { island: val }));
 
 // 灵动岛自定义插件布局逻辑
@@ -658,7 +658,7 @@ const onPointerDown = (item: string, index: number, event: PointerEvent) => {
     // 兼容点取消（比如按了 Esc 或系统中断）
     window.addEventListener('pointercancel', handleGlobalUp);
 
-    // 4. 【安全阀】5秒后如果还没结束，强制重置，防止永久卡死
+    // 4. 安全阀：5 秒后若拖拽仍未结束，强制重置，防止永久卡死
     if (safetyTimer) clearTimeout(safetyTimer);
     safetyTimer = window.setTimeout(() => {
         if (isDragging.value) {
@@ -735,7 +735,7 @@ const highlightDropTarget = (x: number, y: number) => {
     if (slotEl) slotEl.classList.add('is-drag-over');
 };
 
-// 组件卸载时兜底清理
+// 组件卸载时清理拖拽状态
 onUnmounted(() => {
     cleanupDrag();
 });
@@ -803,7 +803,7 @@ const bakeBlurImage = (url: string): Promise<string> => {
 
         img.onload = () => {
             const canvas = document.createElement('canvas');
-            // 降低物理分辨率，进一步榨干性能
+            // 降低物理分辨率以提升性能
             canvas.width = 120;
             canvas.height = 120;
             const ctx = canvas.getContext('2d');
@@ -815,7 +815,7 @@ const bakeBlurImage = (url: string): Promise<string> => {
             ctx.drawImage(img, -10, -10, 140, 140);
 
             try {
-                // 导出为画质 0.6 的 jpeg，直接变成一张静态死图
+                // 导出为画质 0.6 的 jpeg，生成静态缩略图
                 resolve(canvas.toDataURL('image/jpeg', 0.6));
             } catch (e) {
                 // 如果遇到 Tauri asset 协议严格跨域，退回原图
@@ -857,7 +857,7 @@ const syncMusicCover = async () => {
                         coverUrl.value = bakedImage;
 
                         if (coverCache.size > 50) coverCache.clear();
-                        // 缓存直接存烤好的静态图，下次切回来连烤都不用烤了
+                        // 缓存已生成的静态缩略图，避免下次重复处理
                         coverCache.set(newTrackInfo, bakedImage);
                     } catch (coverErr) {
                         coverUrl.value = '';
@@ -1254,8 +1254,8 @@ const fetchSpeedStats = async () => {
 
             const speedMB = rxDiff / (1024 * 1024);
 
-            // 核心修复：直接压入完整的 speedMB 浮点数，不做保留两位的截断。
-            // 从而使 ECharts 面对极小流量（如 B/s, KB/s 级别）也能捕捉到微小的轴缩放波动。
+            // 压入完整的 speedMB 浮点数，不做保留两位的截断，
+            // 使 ECharts 面对极小流量（如 B/s、KB/s 级别）也能捕捉到微小的轴缩放波动。
             chartDataQueue.push(speedMB);
             if (chartDataQueue.length > 15) chartDataQueue.shift();
 
@@ -1287,7 +1287,7 @@ const openMywebsite = () => {
     openUrl('https://blog.georgewu.top');
 }
 
-// 新增：静默检查更新（后台偷偷查，不弹窗，报错了也不干扰用户）
+// 静默检查更新：后台执行，不弹窗，出错也不打扰用户
 const silentCheckUpdate = async () => {
     try {
         const localVersionStr = await getVersion();
@@ -1398,7 +1398,7 @@ const checkUpdate = async () => {
             showDialog(t('networkErrorTitle'), t('networkErrorMessage'));
         }
     } finally {
-        isChecking.value = false; // 👈 无论成功失败，最后都恢复状态
+        isChecking.value = false; // 无论成功失败，最后都恢复状态
     }
 };
 
@@ -1507,7 +1507,7 @@ onMounted(async () => {
         const appWindow = getCurrentWindow();
         await appWindow.show();        // 确保窗口显示
         await appWindow.unminimize();  // 如果最小化了，就恢复
-        await appWindow.setFocus();    // 强制抢占焦点弹到最前面
+        await appWindow.setFocus();    // 获取焦点并置顶显示
     });
 
     await listen<{ visible: boolean }>('island-status-sync', (event) => {
