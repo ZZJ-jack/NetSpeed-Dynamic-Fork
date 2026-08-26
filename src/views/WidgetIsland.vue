@@ -598,6 +598,31 @@ watch(isGlowBorderEnabled, (val) => invoke('sync_tray_menu', { glow: val }));
 const spectrumData = ref([0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35]);
 let spectrumTimer: number;
 
+// 播放中但没有声音（静音/无声视频）时的拟真频谱：让指示器保持律动，而不是瘫成一条线
+const SILENCE_THRESHOLD = 0.12; // 7 柱全部低于该值视为"没有声音"
+let fakeSpectrum = [0.35, 0.35, 0.35, 0.35, 0.35, 0.35, 0.35];
+let fakeSpectrumTargets = [...fakeSpectrum];
+let fakeSpectrumTargetTs = 0;
+const generateFakeSpectrum = (): number[] => {
+    const now = Date.now();
+    // 每 250ms 换一批随机目标，模拟频段起伏
+    if (now - fakeSpectrumTargetTs > 250) {
+        fakeSpectrumTargetTs = now;
+        for (let i = 0; i < fakeSpectrumTargets.length; i++) {
+            fakeSpectrumTargets[i] = 0.3 + Math.random() * 0.7;
+        }
+    }
+    for (let i = 0; i < fakeSpectrum.length; i++) {
+        // 两端略低，山丘形更自然
+        const side = 1 - Math.abs(3 - i) * 0.12;
+        fakeSpectrum[i] += (fakeSpectrumTargets[i] * side - fakeSpectrum[i]) * 0.45;
+    }
+    return [...fakeSpectrum];
+};
+// 频谱数据"无声音"判定：全部低于阈值时用拟真频谱兜底
+const ensureSpectrumLive = (data: number[]): number[] =>
+    data.every(v => v < SILENCE_THRESHOLD) ? generateFakeSpectrum() : data;
+
 // Just Solo LyricServer v1.2.0：12 频段 -> 7 频段（与本地频谱柱数一致，低到高分组取均值）
 const convertWs12To7 = (bands12: number[]): number[] => {
     const groups: number[][] = [
@@ -623,6 +648,8 @@ const currentIsVideoPlayer = ref(false);
 const isSmtcCoverActive = ref(false);
 // 浏览器是否成功获取到封面/歌词（成功即视为播放音乐，而非视频）
 const isBrowserMusic = ref(false);
+// 浏览器标题命中视频站后缀（如优酷 "-电视剧-高清完整正版视频在线观看-优酷"）时强制判定为视频模式
+const isBrowserVideoTitle = ref(false);
 // 当前 SMTC 来源应用的包名（用于 PotPlayer 音乐模式等封面策略判断）
 const currentAppIdStr = ref('');
 
@@ -738,6 +765,37 @@ const fetchAndApplySmtcCover = async (trackInfo: string, onlyIfChanged = false) 
     }
 };
 
+// 网络封面"无封面"判定：后端拿不到封面时返回占位 SVG（data:image/svg+xml）而非空串，
+// 因此空串或占位 SVG 都视为"没拿到真实封面"，用于触发默认图标回退
+const isCoverPlaceholder = (url: string) => !url || url.startsWith('data:image/svg+xml');
+
+// 浏览器音乐模式：网络封面失败回退到默认图标后，定时重试拉真实封面（拿到后自动替换图标）
+let coverRetryTimer: number | undefined;
+let coverRetryTrack = '';
+let coverRetryCount = 0;
+const COVER_RETRY_MS = 5000; // 重试间隔
+const COVER_RETRY_MAX = 4;   // 每首歌最多重试次数
+const scheduleCoverRetry = (trackInfo: string) => {
+    if (coverRetryTimer) clearTimeout(coverRetryTimer);
+    // 换了首歌重试计数复位
+    if (coverRetryTrack !== trackInfo) {
+        coverRetryTrack = trackInfo;
+        coverRetryCount = 0;
+    }
+    coverRetryTimer = window.setTimeout(async () => {
+        coverRetryTimer = undefined;
+        // 已切歌 / 已不是浏览器音乐模式 → 放弃重试
+        const curTrackInfo = currentArtistName.value ? `${currentSongName.value} - ${currentArtistName.value}` : currentSongName.value;
+        if (curTrackInfo !== trackInfo || !isBrowserMusic.value) return;
+        if (coverRetryCount >= COVER_RETRY_MAX) return;
+        coverRetryCount++;
+        // 清缓存强制重新请求，重新走封面决策；拿到真实封面后不会再进回退分支，重试自然停止
+        coverCache.delete(trackInfo);
+        blurredCoverCache.delete(trackInfo);
+        await applyCoverForApp(trackInfo, currentSongName.value, currentArtistName.value, currentAppIdStr.value, true, true);
+    }, COVER_RETRY_MS);
+};
+
 // 集中封面决策函数：根据应用类型统一决定封面策略，供切歌与恢复播放复用
 // 参数：
 //   trackInfo   缓存 key（"歌名 - 歌手"）
@@ -766,22 +824,37 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
         return true;
     }
 
-    // 浏览器：先回退到默认应用图标，再尝试用 SMTC 本地封面覆盖
-    // 若浏览器已判定为播放音乐（拉到歌词），则直接走网络封面（歌词元数据更准，封面也以网络为准）
+    // 浏览器音乐模式：优先 SMTC 本地封面，拿不到再走网络兜底
+    // 浏览器视频模式：先尝试用 SMTC 本地封面覆盖，若拿不到再走默认浏览器图标
     if (isBrowser) {
         isSmtcCoverActive.value = false;
-        coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
-        if (isBrowserMusic.value) {
+        if (isBrowserMusic.value) { // 浏览器已判定为播放音乐（拉到歌词），则直接走网络封面
             await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, true);
+            // 网络封面拿不到（空串或后端占位 SVG 都视为无封面）→ 回退到默认图标，并定时重试拉真实封面
+            if (isCoverPlaceholder(coverUrl.value)) {
+                coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+                blurredCoverUrl.value = '';
+                isSmtcCoverActive.value = false;
+                blurredCoverCache.clear();
+                coverCache.clear();
+                scheduleCoverRetry(trackInfo);
+                return true;
+            }
         } else {
             await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
+            if (!isSmtcCoverActive.value) {
+                coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+            }
         }
         return true;
     }
 
-    // JustSolo：直接使用 SMTC 封面
+    // JustSolo：直接使用 SMTC 封面，若拿不到再走网络兜底
     if (isJustSolo) {
         await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
+        if (!isSmtcCoverActive.value) { // 如果 SMTC 没拿到封面，走网络兜底
+            await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, false);
+        }
         return true;
     }
 
@@ -959,7 +1032,7 @@ const initWebSocket = async () => {
                         lastWsLyricTime = Date.now();
                         if (Array.isArray(payload.bands) && payload.bands.length === 12) {
                             lastWsSpectrumTime = Date.now();
-                            spectrumData.value = convertWs12To7(payload.bands);
+                            spectrumData.value = ensureSpectrumLive(convertWs12To7(payload.bands));
                         }
                         return;
                     }
@@ -1170,6 +1243,26 @@ const extractArtistFromSmtc = (smtcSong: string) => {
     return '';
 };
 
+// 浏览器视频站标题后缀列表：命中任一后缀即判定为浏览器视频模式，并统一删除该后缀
+// 注意：判定要用清理前的原始标题（清理后后缀已被删掉，无法再判）
+const BROWSER_VIDEO_SUFFIX_RE = [
+    /_[ _]*哔哩哔哩[ _]*bilibili\s*$/i,          // B 站："标题_哔哩哔哩_bilibili"
+    /-电视剧-高清完整正版视频在线观看-优酷\s*$/i,    // 优酷剧集："剧名-电视剧-高清完整正版视频在线观看-优酷"
+    /-电影-高清完整正版视频在线观看-优酷\s*$/i,    // 优酷剧集："剧名-电影-高清完整正版视频在线观看-优酷"
+];
+
+// 统一判定：标题是否命中任一视频站后缀（浏览器 → 视频模式）
+const matchesBrowserVideoSuffix = (title: string) => BROWSER_VIDEO_SUFFIX_RE.some(re => re.test(title));
+
+// 统一后缀删除函数：去掉标题里的所有视频站后缀及残留分隔符
+const cleanSongTitle = (title: string) => {
+    let s = title;
+    for (const re of BROWSER_VIDEO_SUFFIX_RE) {
+        s = s.replace(re, '');
+    }
+    return s.replace(/[_\- ]+$/, '').trim();
+};
+
 // 核心同步函数：负责获取状态并智能降级
 const syncMusicStatus = async () => {
     try {
@@ -1179,7 +1272,11 @@ const syncMusicStatus = async () => {
         const isWsActive = (Date.now() - lastWsLyricTime < 3000);
 
         if (res) {
-            const [song, artist, playing, positionMs, durationMs, app_id_str] = res;
+            const [rawSong, artist, playing, positionMs, durationMs, app_id_str] = res;
+            // 标题命中任一视频站后缀（B站/优酷等）→ 强制判定为浏览器视频模式（用清理前的原始标题判断）
+            isBrowserVideoTitle.value = matchesBrowserVideoSuffix(rawSong);
+            // 统一清理标题：删除视频站后缀，展示与搜索都用干净标题
+            const song = cleanSongTitle(rawSong);
             console.log('syncMusicStatus', song, artist, playing, positionMs, durationMs, app_id_str);
 
             // 记录当前是否为浏览器类应用（edge/chrome），供封面刷新逻辑区分处理
@@ -1189,8 +1286,9 @@ const syncMusicStatus = async () => {
             }
 
             // 记录当前是否为视频类应用（potplayer/浏览器视频），供歌词显示逻辑区分处理
-            // 浏览器：拉到歌词即视为播放音乐（isBrowserMusic），否则视为播放视频
-            currentIsVideoPlayer.value = (artist === "potplayer" || app_id_str.includes("bilibili") || (currentIsBrowser.value && !isBrowserMusic.value));
+            // 浏览器：拉到歌词即视为播放音乐（isBrowserMusic），否则视为播放视频；
+            // 标题命中视频站后缀（优酷剧集）也强制视为视频
+            currentIsVideoPlayer.value = (artist === "potplayer" || app_id_str.includes("bilibili") || (currentIsBrowser.value && !isBrowserMusic.value) || isBrowserVideoTitle.value);
 
             // 检测 SMTC 来源应用是否发生了切换（应用包名变更），用于及时刷新歌词
             const appSwitched = currentAppIdStr.value !== '' && currentAppIdStr.value !== app_id_str;
@@ -1234,15 +1332,19 @@ const syncMusicStatus = async () => {
                 currentDurationMs.value = lastLyric.time + 8000;
             }
 
+            const newTrackInfo = artist ? `${song} - ${artist}` : song;
+            // 是否切到了新内容（切歌或浏览器切换 SMTC 播放的内容）
+            const isNewTrack = currentBaseInfo.value !== newTrackInfo;
+
             // 浏览器已判定为播放音乐时，标题/歌手由 fetch_song_meta 提供（更准），
-            // 不再用 SMTC 的原始值（如"正在播放: 歌名 - 歌手" / "edge"）覆盖
-            if (!(currentIsBrowser.value && isBrowserMusic.value)) {
+            // 不再用 SMTC 的原始值（如"正在播放: 歌名 - 歌手" / "edge"）覆盖；
+            // 但切到新内容时必须立即刷新为 SMTC 原始值，避免旧标题残留
+            if (!(currentIsBrowser.value && isBrowserMusic.value && !isNewTrack)) {
                 currentSongName.value = song;
                 currentArtistName.value = artist || t('unknownArtist');
             }
-            const newTrackInfo = artist ? `${song} - ${artist}` : song;
 
-            if (currentBaseInfo.value !== newTrackInfo) {
+            if (isNewTrack) {
                 currentBaseInfo.value = newTrackInfo;
 
                 // 切歌时重置浏览器音乐判定，等封面/歌词获取结果再确认是音乐还是视频
@@ -1284,7 +1386,8 @@ const syncMusicStatus = async () => {
 
                 // 仅在 WS 不活跃时，发起 HTTP 网络歌词兜底（PotPlayer 不拉歌词，标题常驻）
                 // 切换 SMTC 应用后 WS 心跳可能仍属于旧应用，此时也立即用 HTTP 兜底，保证新歌歌词及时到位
-                if ((!isWsActive || appSwitched) && !isPotplayerSource.value) {
+                // 标题命中视频站后缀（优酷剧集）不拉歌词，保持视频模式
+                if ((!isWsActive || appSwitched) && !isPotplayerSource.value && !isBrowserVideoTitle.value) {
                     invoke<string>('fetch_netease_lyrics', { songName: song, artistName: artist, durationMs })
                         .then(lrc => {
                             if (appSwitched || Date.now() - lastWsLyricTime > 3000) {
@@ -1405,8 +1508,8 @@ const isVideoLikeSource = computed(() => {
     if (isPotplayerSource.value) return true;
     // B站：始终作为视频类
     if (currentAppIdStr.value.includes('bilibili')) return true;
-    // 浏览器：成功获取到封面/歌词即视为播放音乐，否则视为播放视频
-    if (currentIsBrowser.value) return !isBrowserMusic.value;
+    // 浏览器：成功获取到封面/歌词即视为播放音乐，否则视为播放视频；命中视频站后缀也强制视为视频
+    if (currentIsBrowser.value) return !isBrowserMusic.value || isBrowserVideoTitle.value;
     return false;
 });
 
@@ -1598,8 +1701,6 @@ const calculateScroll = () => {
     } else {
         containerWidth = collapsedMaskWidth || realContainerWidth;
     }
-
-    console.log('[calculateScroll]', { textWidth, containerWidth, text: currentTrackInfo.value });
 
     // 让文字末尾滚到容器最右侧，完整显示整句歌词（而非只滚到 75% 安全区）
     const safeWidth = containerWidth;
@@ -3120,7 +3221,7 @@ onMounted(async () => {
             if (showSpectrumIndicator.value && !wsSpectrumFresh) {
                 try {
                     const data = await invoke<number[]>('get_audio_spectrum');
-                    spectrumData.value = data;
+                    spectrumData.value = ensureSpectrumLive(data);
                 } catch (err) {
                     // 忽略错误，防止刷屏
                 }
@@ -3153,6 +3254,7 @@ onUnmounted(() => {
     clearInterval(notifyTimer);
     clearInterval(spectrumTimer);
     if (speedCycleTimer) clearInterval(speedCycleTimer);
+    if (coverRetryTimer) clearTimeout(coverRetryTimer);
 });
 </script>
 
