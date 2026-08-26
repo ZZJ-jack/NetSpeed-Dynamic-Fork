@@ -684,8 +684,8 @@ let coverReqSeq = 0;
 
 // 把拿到的封面写入状态 + 缓存 + 烘焙模糊封面（网络与 SMTC 两条路径的公共落点）
 // onlyIfChanged=true 且新封面与当前显示相同 → 不应用（恢复播放时避免无意义刷新）
-const applyCoverToState = async (trackInfo: string, url: string, onlyIfChanged: boolean): Promise<boolean> => {
-    if (onlyIfChanged && url === coverUrl.value) return false;
+const applyCoverToState = async (trackInfo: string, url: string, onlyIfChanged: boolean) => {
+    if (onlyIfChanged && url === coverUrl.value) return;
     coverUrl.value = url;
     // 缓存超过 50 条时整体清空，防止内存无限增长
     if (coverCache.size > 50) {
@@ -697,6 +697,20 @@ const applyCoverToState = async (trackInfo: string, url: string, onlyIfChanged: 
     const bakedImage = await bakeBlurImage(url);
     blurredCoverUrl.value = bakedImage;
     blurredCoverCache.set(trackInfo, bakedImage);
+};
+
+// 封面缓存命中恢复（网络与 SMTC 共用）：
+//   命中返回 true；mySeq !== coverReqSeq（请求已过期，期间切歌）时不应用封面，仅返回命中
+//   markSmtcActive 命中即置 isSmtcCoverActive（SMTC 专用：缓存命中说明该曲目拿到过 SMTC 封面）
+const applyCachedCover = (trackInfo: string, onlyIfChanged: boolean, mySeq: number, markSmtcActive = false): boolean => {
+    if (!coverCache.has(trackInfo)) return false;
+    if (markSmtcActive) isSmtcCoverActive.value = true;
+    if (mySeq !== coverReqSeq) return true; // 请求已过期，放弃应用，防止旧封面覆盖新封面
+    const cached = coverCache.get(trackInfo)!;
+    if (!onlyIfChanged || cached !== coverUrl.value) {
+        coverUrl.value = cached;
+        blurredCoverUrl.value = blurredCoverCache.get(trackInfo) || '';
+    }
     return true;
 };
 
@@ -707,14 +721,7 @@ const applyCoverToState = async (trackInfo: string, url: string, onlyIfChanged: 
 const fetchAndApplyCover = async (trackInfo: string, song: string, artist: string, onlyIfChanged = false, clearOnError = true, preferSmtc = true) => {
     // 每次调用自增序号，请求返回后若序号已变（期间切歌）则丢弃结果，防止旧封面覆盖新封面
     const mySeq = ++coverReqSeq;
-    if (coverCache.has(trackInfo)) {
-        const cached = coverCache.get(trackInfo)!;
-        if (mySeq === coverReqSeq && (!onlyIfChanged || cached !== coverUrl.value)) {
-            coverUrl.value = cached;
-            blurredCoverUrl.value = blurredCoverCache.get(trackInfo) || '';
-        }
-        return;
-    }
+    if (applyCachedCover(trackInfo, onlyIfChanged, mySeq)) return;
     try {
         const url = await invoke<string>('get_random_cover_url', { songName: song, artistName: artist, preferSmtc });
         // 期间已切到新内容，丢弃过期结果
@@ -734,16 +741,8 @@ const fetchAndApplyCover = async (trackInfo: string, song: string, artist: strin
 // 也供浏览器 logo 兜底判断"是否已拿到 SMTC 封面、无需退回默认图标"
 const fetchAndApplySmtcCover = async (trackInfo: string, onlyIfChanged = false) => {
     const mySeq = ++coverReqSeq;
-    if (coverCache.has(trackInfo)) {
-        const cached = coverCache.get(trackInfo)!;
-        if (mySeq === coverReqSeq && (!onlyIfChanged || cached !== coverUrl.value)) {
-            coverUrl.value = cached;
-            blurredCoverUrl.value = blurredCoverCache.get(trackInfo) || '';
-        }
-        // 缓存命中说明该曲目已拿到过 SMTC 封面，标记为 SMTC 封面活跃
-        isSmtcCoverActive.value = true;
-        return;
-    }
+    // 缓存命中（含置 isSmtcCoverActive=true）则直接使用
+    if (applyCachedCover(trackInfo, onlyIfChanged, mySeq, true)) return;
     // 切歌场景：SMTC 封面可能晚于标题就绪，最多重试 3 次（间隔 1.5s）确保拿到新封面
     const maxAttempts = onlyIfChanged ? 1 : 3;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -784,9 +783,10 @@ const scheduleCoverRetry = (trackInfo: string) => {
     }
     coverRetryTimer = window.setTimeout(async () => {
         coverRetryTimer = undefined;
-        // 已切歌 / 已不是浏览器音乐模式 → 放弃重试
+        // 已切歌 → 放弃重试
+        // （是否音乐由 applyCoverForApp 按当前状态重新分派：音乐走网络重拉，视频重试 SMTC 晚到封面）
         const curTrackInfo = currentArtistName.value ? `${currentSongName.value} - ${currentArtistName.value}` : currentSongName.value;
-        if (curTrackInfo !== trackInfo || !isBrowserMusic.value) return;
+        if (curTrackInfo !== trackInfo) return;
         if (coverRetryCount >= COVER_RETRY_MAX) return;
         coverRetryCount++;
         // 清缓存强制重新请求，重新走封面决策；拿到真实封面后不会再进回退分支，重试自然停止
@@ -796,6 +796,16 @@ const scheduleCoverRetry = (trackInfo: string) => {
     }, COVER_RETRY_MS);
 };
 
+// 浏览器 logo 兜底：设置默认图标 + 清空上首歌残留的模糊封面 + 删除当前曲目缓存（供重试强制重拉）
+// 音乐/视频模式统一入口：SMTC 或网络封面没拿到时都回退到默认图标，并排一次重试
+const fallbackBrowserLogo = (appIdStr: string, trackInfo: string) => {
+    coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+    blurredCoverUrl.value = '';
+    blurredCoverCache.delete(trackInfo);
+    coverCache.delete(trackInfo);
+    scheduleCoverRetry(trackInfo);
+};
+
 // 集中封面决策函数：根据应用类型统一决定封面策略，供切歌与恢复播放复用
 // 参数：
 //   trackInfo   缓存 key（"歌名 - 歌手"）
@@ -803,7 +813,7 @@ const scheduleCoverRetry = (trackInfo: string) => {
 //   appIdStr    SMTC 来源应用包名（决定应用类型）
 //   onlyIfChanged 与当前显示封面对比，不一样才应用（恢复播放时用 true）
 //   clearOnError  获取失败时是否清空封面（切歌时 true，恢复播放时 false）
-// 返回 true 表示已应用封面（含 logo 兜底），false 表示需要调用方自行兜底
+// 各应用类型都会自行完成封面应用（含 logo 兜底），无需调用方二次兜底
 const applyCoverForApp = async (trackInfo: string, song: string, artist: string, appIdStr: string, onlyIfChanged = false, clearOnError = true) => {
     // PotPlayer 视频/音乐模式判定：
     //   后端在 PotPlayer 无歌手元数据时会把 artist 占位为 "potplayer"（视频通常无歌手）→ 视频模式
@@ -814,14 +824,12 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
     const isBilibili = appIdStr.includes("bilibili");
     const isJustSolo = appIdStr.includes("justsolo");
 
-    // PotPlayer 视频模式：使用 logo，清空所有封面缓存，防止 coverglass 背景残留上一首歌
+    // PotPlayer 视频模式：使用 logo，并清空模糊封面，防止 coverglass 背景残留上一首歌
     if (isPotplayerVideo) {
         coverUrl.value = potplayerLogo;
         blurredCoverUrl.value = '';
         isSmtcCoverActive.value = false;
-        blurredCoverCache.clear();
-        coverCache.clear();
-        return true;
+        return;
     }
 
     // 浏览器音乐模式：优先 SMTC 本地封面，拿不到再走网络兜底
@@ -832,36 +840,33 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
             await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, true);
             // 网络封面拿不到（空串或后端占位 SVG 都视为无封面）→ 回退到默认图标，并定时重试拉真实封面
             if (isCoverPlaceholder(coverUrl.value)) {
-                coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
-                blurredCoverUrl.value = '';
-                isSmtcCoverActive.value = false;
-                blurredCoverCache.clear();
-                coverCache.clear();
-                scheduleCoverRetry(trackInfo);
-                return true;
+                fallbackBrowserLogo(appIdStr, trackInfo);
             }
         } else {
             await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
+            // SMTC 没拿到 → 回退到默认图标，并定时重试 SMTC（封面可能晚于标题就绪）
             if (!isSmtcCoverActive.value) {
-                coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+                fallbackBrowserLogo(appIdStr, trackInfo);
             }
         }
-        return true;
+        return;
     }
 
     // JustSolo：直接使用 SMTC 封面，若拿不到再走网络兜底
     if (isJustSolo) {
+        // 先重置 SMTC 活跃标志，防止上首歌置 true 后残留，导致本首歌 SMTC 失败时跳过网络兜底
+        isSmtcCoverActive.value = false;
         await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
         if (!isSmtcCoverActive.value) { // 如果 SMTC 没拿到封面，走网络兜底
             await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, false);
         }
-        return true;
+        return;
     }
 
     // bilibili：固定 logo 封面
     if (isBilibili) {
         coverUrl.value = bilibiliLogo;
-        return true;
+        return;
     }
 
     // PotPlayer 音乐模式：优先 SMTC 本地封面，拿不到再走网络兜底
@@ -874,12 +879,11 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
         if (!isSmtcCoverActive.value) {
             await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, false);
         }
-        return true;
+        return;
     }
 
     // 其他应用：走网络（后端内部默认先尝试 SMTC 再网络）
     await fetchAndApplyCover(trackInfo, song, artist, onlyIfChanged, clearOnError, true);
-    return true;
 };
 
 // 实时FPS功能相关
@@ -1246,9 +1250,18 @@ const extractArtistFromSmtc = (smtcSong: string) => {
 // 浏览器视频站标题后缀列表：命中任一后缀即判定为浏览器视频模式，并统一删除该后缀
 // 注意：判定要用清理前的原始标题（清理后后缀已被删掉，无法再判）
 const BROWSER_VIDEO_SUFFIX_RE = [
-    /_[ _]*哔哩哔哩[ _]*bilibili\s*$/i,          // B 站："标题_哔哩哔哩_bilibili"
-    /-电视剧-高清完整正版视频在线观看-优酷\s*$/i,    // 优酷剧集："剧名-电视剧-高清完整正版视频在线观看-优酷"
-    /-电影-高清完整正版视频在线观看-优酷\s*$/i,    // 优酷剧集："剧名-电影-高清完整正版视频在线观看-优酷"
+    /_[ _]*哔哩哔哩[ _]*bilibili\s*$/i,
+    /-电视剧-高清完整正版视频在线观看-优酷\s*$/i,
+    /-电影-高清完整正版视频在线观看-优酷\s*$/i,
+    /-综艺-高清完整正版视频在线观看-优酷\s*$/i,
+    /-最新热门短剧大全-免费短剧在线观看\s*$/i,
+    /-动漫-高清完整正版视频在线观看-优酷\s*$/i,
+    /-少儿-高清完整正版视频在线观看-优酷\s*$/i,
+    /-纪录片-高清完整正版视频在线观看-优酷\s*$/i,
+    /-体育-高清完整正版视频在线观看-优酷\s*$/i,
+    /-文化-高清完整正版视频在线观看-优酷\s*$/i,
+    /-游戏-高清完整正版视频在线观看-优酷\s*$/i,
+    /-音乐-高清完整正版视频在线观看-优酷\s*$/i,
 ];
 
 // 统一判定：标题是否命中任一视频站后缀（浏览器 → 视频模式）
