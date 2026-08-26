@@ -834,16 +834,18 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
             if (isCoverPlaceholder(coverUrl.value)) {
                 coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
                 blurredCoverUrl.value = '';
-                isSmtcCoverActive.value = false;
                 blurredCoverCache.clear();
                 coverCache.clear();
                 scheduleCoverRetry(trackInfo);
-                return true;
             }
         } else {
             await fetchAndApplySmtcCover(trackInfo, onlyIfChanged);
             if (!isSmtcCoverActive.value) {
                 coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+                blurredCoverUrl.value = '';
+                blurredCoverCache.clear();
+                coverCache.clear();
+                scheduleCoverRetry(trackInfo);            
             }
         }
         return true;
