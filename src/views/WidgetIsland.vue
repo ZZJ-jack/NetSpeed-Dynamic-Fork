@@ -95,6 +95,20 @@
                             <div class="toast-text">{{ sysToastText }}</div>
                         </div>
 
+                        <div v-else-if="displayClipboard" class="clipboard-box" key="clipboard">
+                            <div class="clipboard-icon">
+                                <img :src="clipboardIcon" alt="剪贴板" class="clipboard-icon-img">
+                            </div>
+                            <div class="clipboard-text-wrapper">
+                                <div class="clipboard-title">检测到复制了链接</div>
+                                <div class="clipboard-link">{{ clipboardLink }}</div>
+                            </div>
+                            <button class="clipboard-open-btn" @click.stop="handleOpenClipboardLink"
+                                title="打开链接">
+                                <img :src="openLinkIcon" alt="打开链接" class="clipboard-open-img">
+                            </button>
+                        </div>
+
                         <div v-else-if="displayMusic" class="music-ctl-box" :class="{ 'expanded': isMusicExpanded }"
                             :key="'music_' + musicBoxKey" @click="expandMusic" style="cursor: pointer;">
                             <div class="music-top-row">
@@ -302,6 +316,7 @@ import { ref, onMounted, onUnmounted, computed, watch, nextTick, type CSSPropert
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, currentMonitor, availableMonitors, PhysicalPosition, LogicalPosition, PhysicalSize, type Window } from '@tauri-apps/api/window'; import { Menu, MenuItem } from '@tauri-apps/api/menu';
 import { listen, emit } from '@tauri-apps/api/event';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { t, currentLanguage, type AppLanguage } from '../i18n';
 
 const isIslandVisible = ref(false);
@@ -424,6 +439,90 @@ watch(isMsgActive, (newVal) => {
         processToastQueue();
     }
 });
+
+// ==================== 剪贴板链接通知 ====================
+const displayClipboard = ref(false);
+const clipboardLink = ref('');
+let clipboardHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 打开剪贴板中的链接（调用系统默认浏览器）
+const handleOpenClipboardLink = async () => {
+    if (!clipboardLink.value) return;
+    try {
+        await openUrl(clipboardLink.value);
+    } catch (err) {
+        console.error('打开链接失败:', err);
+    }
+    // 打开后关闭通知
+    displayClipboard.value = false;
+    if (clipboardHideTimer) clearTimeout(clipboardHideTimer);
+    if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+        const { w, h } = getBaseSize();
+        animateIslandSize(w, h);
+    }
+};
+
+// 每次复制发生时读取剪贴板，若内容是 http/https 链接则弹出卡片
+const pollClipboard = async () => {
+    try {
+        const text = await invoke<string>('get_clipboard_text');
+        if (!text) return;
+
+        // 提取第一个 http/https 链接
+        const m = text.match(/https?:\/\/[^\s]+/);
+        if (!m) return;
+
+        const link = m[0].replace(/[.,;,，。]$/, '');
+
+        clipboardLink.value = link;
+        displayClipboard.value = true;
+        // 若消息通知此刻正在占用，等它消失后再让出尺寸（见下方 watch）
+        if (!isMsgActive.value) {
+            animateIslandSize(Math.max(nsdMsgExpandedWidth.value, 320), 70);
+        }
+
+        if (clipboardHideTimer) clearTimeout(clipboardHideTimer);
+        clipboardHideTimer = setTimeout(() => {
+            displayClipboard.value = false;
+            if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+                const { w, h } = getBaseSize();
+                animateIslandSize(w, h);
+            }
+        }, 5000);
+    } catch (err) {
+        // 剪贴板读取失败时静默忽略
+        console.error(err);
+    }
+};
+
+// 剪贴板通知挂起时，等消息消失后补上尺寸
+watch(isMsgActive, (newVal) => {
+    if (!newVal && displayClipboard.value) {
+        animateIslandSize(Math.max(nsdMsgExpandedWidth.value, 320), 70);
+    }
+});
+
+// 启动剪贴板监听：由后端在复制操作时通过事件驱动，无需轮询
+let stopClipboardListener: (() => void) | null = null;
+const startClipboardPolling = async () => {
+    if (stopClipboardListener) return;
+    stopClipboardListener = await listen('clipboard-changed', () => {
+        // 复制发生时再去读剪贴板并检测链接
+        pollClipboard();
+    });
+};
+
+// 停止剪贴板监听（组件卸载时调用）
+const stopClipboardPolling = () => {
+    if (stopClipboardListener) {
+        stopClipboardListener();
+        stopClipboardListener = null;
+    }
+    if (clipboardHideTimer) {
+        clearTimeout(clipboardHideTimer);
+        clipboardHideTimer = null;
+    }
+};
 
 // 记录音乐岛是否处于展开状态
 const isMusicExpanded = ref(false);
@@ -1122,9 +1221,9 @@ const displayResource = computed(() => !enableCustomDisplay.value && !isMsgActiv
 const displaySpeed = computed(() => !enableCustomDisplay.value && !isMsgActive.value && !displaySysToast.value && !enableSysResource.value && !enableFps.value && (!isMusicCtlEnabled.value || !isMediaActive.value));
 const displayMusic = computed(() => !isMsgActive.value && !displaySysToast.value && isMusicCtlEnabled.value && isMediaActive.value && !enableCustomDisplay.value);
 
-// 智能判断静默模式下是否该显示：有消息、有系统提示，或开启了音乐控制且正在播放
+// 智能判断静默模式下是否该显示：有消息、有系统提示、剪贴板链接通知，或开启了音乐控制且正在播放
 const shouldShowInQuietMode = computed(() =>
-    isMsgActive.value || displaySysToast.value || (isMusicCtlEnabled.value && isMediaActive.value)
+    isMsgActive.value || displaySysToast.value || displayClipboard.value || (isMusicCtlEnabled.value && isMediaActive.value)
 );
 watch(shouldShowInQuietMode, async (newVal) => {
     if (isMsgModeEnabled.value) {
@@ -2562,6 +2661,10 @@ import edgeLogo from '../assets/edge-logo.png';
 import chromeLogo from '../assets/chrome-logo.png';
 import potplayerLogo from '../assets/potplayer-logo.jpg';
 
+// 剪贴板链接通知卡片图标
+import clipboardIcon from '../assets/Clipboard.png';
+import openLinkIcon from '../assets/open_the_link.png';
+
 const APP_COVER_LOGOS = [bilibiliLogo, edgeLogo, chromeLogo, potplayerLogo];
 const APP_COVER_LOGO_MAP: Record<string, string> = {
     bilibili: bilibiliLogo,
@@ -2592,6 +2695,9 @@ const getAppIcon = (appName: string) => {
 
 onMounted(async () => {
     const appWindow = getCurrentWindow();
+
+    // 启动剪贴板链接检测轮询
+    startClipboardPolling();
 
     // 记录当前实例的启动时间戳
     const bootTime = Date.now();
@@ -3256,6 +3362,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     stopWebSocket();
+    stopClipboardPolling();
     if (unlistenJustSolo) {
         unlistenJustSolo();
         unlistenJustSolo = null;
@@ -3734,6 +3841,101 @@ onUnmounted(() => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* 灵动岛剪贴板链接通知卡片样式 */
+.clipboard-box {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    box-sizing: border-box;
+    z-index: 10;
+    gap: 12px;
+    -webkit-app-region: no-drag;
+}
+
+.clipboard-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.clipboard-icon-img {
+    width: 24px;
+    height: 24px;
+    object-fit: contain;
+}
+
+.clipboard-text-wrapper {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    overflow: hidden;
+    flex-grow: 1;
+    min-width: 0;
+}
+
+.clipboard-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.clipboard-link {
+    font-size: 12.5px;
+    line-height: 1.4;
+    opacity: 0.78;
+    text-align: left;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+    unicode-bidi: plaintext;
+}
+
+/* 右侧的打开链接按钮 */
+.clipboard-open-btn {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: none;
+    outline: none;
+    background-color: rgba(150, 150, 150, 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+}
+
+.clipboard-open-btn:hover {
+    background-color: rgba(255, 255, 255, 0.35);
+}
+
+.clipboard-open-btn:active {
+    transform: scale(0.92);
+}
+
+.clipboard-open-img {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
 }
 
 .value.high-usage {

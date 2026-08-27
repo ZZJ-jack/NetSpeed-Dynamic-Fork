@@ -466,6 +466,147 @@ fn is_widget_visible(app: tauri::AppHandle) -> bool {
     }
 }
 
+/// 读取系统剪贴板文本（Windows 专用），供灵动岛检测复制到链接
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_clipboard_text() -> Result<String, String> {
+    unsafe {
+        use winapi::um::winbase::{GlobalLock, GlobalUnlock};
+        use winapi::um::winuser::{CF_UNICODETEXT, CloseClipboard, GetClipboardData, OpenClipboard};
+
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Err("无法打开剪贴板".to_string());
+        }
+
+        // 若剪贴板为空或格式不含文本，全局句柄为 NULL
+        let handle = GetClipboardData(CF_UNICODETEXT as u32);
+        if handle.is_null() {
+            CloseClipboard();
+            return Ok(String::new());
+        }
+
+        let ptr = GlobalLock(handle) as *const u16;
+        if ptr.is_null() {
+            CloseClipboard();
+            return Ok(String::new());
+        }
+
+        // 统计字符串长度直到遇到结尾空字符
+        let mut len = 0usize;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+
+        GlobalUnlock(handle);
+        CloseClipboard();
+        Ok(text)
+    }
+}
+
+// 非 Windows 平台空实现，避免编译报错
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_clipboard_text() -> Result<String, String> {
+    Ok(String::new())
+}
+
+// 缓存 AppHandle 供剪贴板监听线程的窗口过程使用
+#[cfg(target_os = "windows")]
+static CLIPBOARD_EMITTER: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+// 剪贴板监听窗口过程：一旦检测到剪贴板内容变化（WM_CLIPBOARDUPDATE），推送事件给前端
+#[cfg(target_os = "windows")]
+extern "system" fn clipboard_wndproc(
+    hwnd: winapi::shared::windef::HWND,
+    msg: winapi::shared::minwindef::UINT,
+    wparam: winapi::shared::minwindef::WPARAM,
+    lparam: winapi::shared::minwindef::LPARAM,
+) -> winapi::shared::minwindef::LRESULT {
+    use winapi::um::winuser::{
+        DefWindowProcW, PostQuitMessage, WM_CLIPBOARDUPDATE, WM_DESTROY,
+    };
+    unsafe {
+        if msg == WM_CLIPBOARDUPDATE {
+            if let Some(app) = CLIPBOARD_EMITTER.get() {
+                let _ = Emitter::emit(app, "clipboard-changed", ());
+            }
+            return 0;
+        }
+        if msg == WM_DESTROY {
+            PostQuitMessage(0);
+            return 0;
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+// 启动剪贴板变更监听（事件驱动，无需轮询）：通过隐藏窗口 + AddClipboardFormatListener
+#[cfg(target_os = "windows")]
+fn start_clipboard_monitor(app: tauri::AppHandle) {
+    use winapi::um::libloaderapi::GetModuleHandleW;
+    use winapi::um::winuser::{
+        AddClipboardFormatListener, CreateWindowExW, DispatchMessageW, GetMessageW,
+        RegisterClassW, TranslateMessage, MSG, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    };
+
+    // 缓存 AppHandle 供窗口过程回调使用
+    let _ = CLIPBOARD_EMITTER.set(app);
+
+    std::thread::spawn(|| unsafe {
+        let class_name = "NetSpeedClipboardListener"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<u16>>();
+        let hinstance = GetModuleHandleW(std::ptr::null());
+
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(clipboard_wndproc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance as _,
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class_name.as_ptr(),
+        };
+        // 注册窗口失败则直接退出监听线程
+        if RegisterClassW(&wc) == 0 {
+            return;
+        }
+
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            class_name.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinstance as _,
+            std::ptr::null_mut(),
+        );
+        if hwnd.is_null() {
+            return;
+        }
+
+        // 注册为剪贴板格式监听者，剪贴板变化时收到 WM_CLIPBOARDUPDATE
+        AddClipboardFormatListener(hwnd);
+
+        // 线程消息循环
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let networks = Networks::new_with_refreshed_list();
@@ -507,10 +648,14 @@ pub fn run() {
             music_controller::stop_websocket_lyrics,
             toggle_fps_plugin,
             sync_tray_menu,
+            get_clipboard_text,
         ])
         .setup(|app| {
             audio_spectrum::start_monitor();
             system_events::start_monitor(app.handle().clone());
+            // 启动剪贴板变更监听（事件驱动，复制时实时推送）
+            #[cfg(target_os = "windows")]
+            start_clipboard_monitor(app.handle().clone());
 
             // 启动超轻量 UDP 监听器，专用于接收 FPS 数据 (监听 47292 端口)
             let app_handle_for_fps = app.handle().clone();
