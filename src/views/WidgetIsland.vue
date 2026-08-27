@@ -444,6 +444,8 @@ watch(isMsgActive, (newVal) => {
 const displayClipboard = ref(false);
 const clipboardLink = ref('');
 let clipboardHideTimer: ReturnType<typeof setTimeout> | null = null;
+// 剪贴板读取开关（默认开启）
+const enableClipboard = ref(localStorage.getItem('nsd_clipboard') !== 'false');
 
 // 打开剪贴板中的链接（调用系统默认浏览器）
 const handleOpenClipboardLink = async () => {
@@ -521,6 +523,14 @@ const stopClipboardPolling = () => {
     if (clipboardHideTimer) {
         clearTimeout(clipboardHideTimer);
         clipboardHideTimer = null;
+    }
+    // 关闭开关时同步收起正在显示的剪贴板卡片
+    if (displayClipboard.value) {
+        displayClipboard.value = false;
+        if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+            const { w, h } = getBaseSize();
+            animateIslandSize(w, h);
+        }
     }
 };
 
@@ -2696,8 +2706,10 @@ const getAppIcon = (appName: string) => {
 onMounted(async () => {
     const appWindow = getCurrentWindow();
 
-    // 启动剪贴板链接检测轮询
-    startClipboardPolling();
+    // 启动剪贴板链接检测轮询（默认开启）
+    if (enableClipboard.value) {
+        startClipboardPolling();
+    }
 
     // 记录当前实例的启动时间戳
     const bootTime = Date.now();
@@ -2811,6 +2823,17 @@ onMounted(async () => {
         if (isEnabled) {
             isMusicCtlEnabled.value = false; // 开启资源监控，关音乐控制器
             stopWebSocket();
+        }
+    });
+
+    // 监听控制台发来的剪贴板读取开关
+    await listen<{ enabled: boolean }>('control-clipboard', (event) => {
+        const isEnabled = event.payload.enabled;
+        enableClipboard.value = isEnabled;
+        if (isEnabled) {
+            startClipboardPolling();
+        } else {
+            stopClipboardPolling();
         }
     });
 

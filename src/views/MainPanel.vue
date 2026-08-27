@@ -400,6 +400,16 @@
                                         <span class="slider"></span>
                                     </label>
                                 </div>
+                                <div class="set-item clipboard-set-item">
+                                    <div class="set-item-meta">
+                                        <span class="set-item-title">{{ t('clipboardMonitor') }}</span>
+                                        <span class="set-item-desc">{{ t('clipboardMonitorDesc') }}</span>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" v-model="enableClipboard" @change="toggleClipboard">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
                                 <div class="set-item">
                                     <div class="set-item-meta">
                                         <span class="set-item-title">{{ t('realtimeFps') }}</span>
@@ -927,6 +937,7 @@ const enableMsgNotify = ref(localStorage.getItem('nsd_msg_notify') === 'true');
 const msgModeEnabled = ref(localStorage.getItem('nsd_msg_mode') === 'true');
 const autoHideFullscreen = ref(localStorage.getItem('nsd_autohide_fs') === 'true');
 const enableSysResource = ref(localStorage.getItem('nsd_sys_resource') === 'true');
+const enableClipboard = ref(localStorage.getItem('nsd_clipboard') !== 'false');
 watch(msgModeEnabled, (val) => invoke('sync_tray_menu', { quiet: val }));
 
 // 切换系统资源监控
@@ -947,6 +958,12 @@ const toggleSysResource = async () => {
             await emit('control-fps-monitor', { enabled: false });
         }
     }
+};
+
+// 切换剪贴板读取
+const toggleClipboard = async () => {
+    localStorage.setItem('nsd_clipboard', String(enableClipboard.value));
+    await emit('control-clipboard', { enabled: enableClipboard.value });
 };
 
 // 切换消息模式
@@ -2911,6 +2928,12 @@ input:disabled+.slider {
     opacity: 0.9;
     width: 12px;
     border-radius: 3px;
+}
+
+/* 剪贴板读取开关：一个选项一个方块，固定在系统资源监控正下方的那一格 */
+.clipboard-set-item {
+    grid-column: 1;
+    grid-row: 2;
 }
 
 /* 自定义显示容器：修复等分挤压 */
