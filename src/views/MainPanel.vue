@@ -278,6 +278,12 @@
                                                 <template v-else-if="targetPlayer === 'lx-music'"><img
                                                         src="../assets/lxmusic.png" class="platform-icon"> {{
                                                             t('lxMusic') }}</template>
+                                                <template v-else-if="targetPlayer === 'browser'">
+                                                    <svg viewBox="0 0 24 24" class="platform-icon" fill="currentColor">
+                                                        <path
+                                                            d="M12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm0-2c3.31 0 6-2.69 6-6s-2.69-6-6-6-6 2.69-6 6 2.69 6 6 6zm-1.5-9a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0zM4.26 12H2.02a9.95 9.95 0 0 0 1.32 6h.98a11.06 11.06 0 0 1-.06-6zm0-2a11.06 11.06 0 0 1 .06-6h-.98A9.95 9.95 0 0 0 2.02 10h2.24zm17.47 0a9.95 9.95 0 0 0-1.31-6h-.98a11.06 11.06 0 0 1 .05 6h2.24zm0 2h-2.24a11.06 11.06 0 0 1-.05 6h.98a9.95 9.95 0 0 0 1.31-6zM7.5 6.09A11.06 11.06 0 0 1 12 5c1.71 0 3.32.48 4.5 1.09V3.5h1v2.05A9.95 9.95 0 0 1 21.07 6l.58 1.79-1.83 1.32A8 8 0 0 0 20 12c-2.4 0-4.5-1.5-5.53-3.07A2.5 2.5 0 0 0 12 6.5c-.86 0-1.6.42-2.06 1.08A5.97 5.97 0 0 1 7.5 6.09z" />
+                                                    </svg>
+                                                    浏览器Pro</template>
                                                 <template v-else-if="targetPlayer === 'other'">
                                                     <svg viewBox="0 0 24 24" class="platform-icon" fill="currentColor">
                                                         <path
@@ -333,6 +339,15 @@
                                                     @click="handleSelectPlayer('lx-music')">
                                                     <img src="../assets/lxmusic.png" class="platform-icon"> {{
                                                         t('lxMusic') }}
+                                                </div>
+                                                <div class="dropdown-item"
+                                                    :class="{ 'is-active': targetPlayer === 'browser' }"
+                                                    @click="handleSelectPlayer('browser')">
+                                                    <svg viewBox="0 0 24 24" class="platform-icon" fill="currentColor">
+                                                        <path
+                                                            d="M12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm0-2c3.31 0 6-2.69 6-6s-2.69-6-6-6-6 2.69-6 6 2.69 6 6 6zm-1.5-9a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0zM4.26 12H2.02a9.95 9.95 0 0 0 1.32 6h.98a11.06 11.06 0 0 1-.06-6zm0-2a11.06 11.06 0 0 1 .06-6h-.98A9.95 9.95 0 0 0 2.02 10h2.24zm17.47 0a9.95 9.95 0 0 0-1.31-6h-.98a11.06 11.06 0 0 1 .05 6h2.24zm0 2h-2.24a11.06 11.06 0 0 1-.05 6h.98a9.95 9.95 0 0 0 1.31-6zM7.5 6.09A11.06 11.06 0 0 1 12 5c1.71 0 3.32.48 4.5 1.09V3.5h1v2.05A9.95 9.95 0 0 1 21.07 6l.58 1.79-1.83 1.32A8 8 0 0 0 20 12c-2.4 0-4.5-1.5-5.53-3.07A2.5 2.5 0 0 0 12 6.5c-.86 0-1.6.42-2.06 1.08A5.97 5.97 0 0 1 7.5 6.09z" />
+                                                    </svg>
+                                                    浏览器Pro
                                                 </div>
                                                 <div class="dropdown-item"
                                                     :class="{ 'is-active': targetPlayer === 'other' }"
@@ -533,7 +548,7 @@
                     <div class="modal-footer">
                         <button v-if="dialog.isConfirm" class="btn btn-secondary" @click="closeDialog">{{ t('cancel')
                             }}</button>
-                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ t('confirm') }}</button>
+                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ dialog.confirmText || t('confirm') }}</button>
                     </div>
                 </div>
             </div>
@@ -905,6 +920,17 @@ const isPlayerDropdownOpen = ref(false);
 const handleSelectPlayer = (player: string) => {
     setTargetPlayer(player);
     isPlayerDropdownOpen.value = false;
+
+    // 浏览器Pro模式：首次选择时弹出说明弹窗
+    if (player === 'browser') {
+        showDialog(
+            '浏览器Pro',
+            '浏览器模式增强了对浏览器SMTC的识别，更加精准识别音乐/视频，目前仅对Edge、Chrome浏览器做支持，其他浏览器请使用其他媒体模式',
+            false,
+            null,
+            '明白'
+        );
+    }
 };
 
 // 数据统计图表类型控制状态与方法
@@ -1164,11 +1190,12 @@ const dialog = ref({
     title: 'NetSpeed Dynamic',
     message: '',
     isConfirm: false,
+    confirmText: '', // 确定按钮文字，为空时用默认 t('confirm')
     callback: null as (() => void) | null
 });
 
-const showDialog = (title: string, message: string, isConfirm = false, onConfirm: (() => void) | null = null) => {
-    dialog.value = { visible: true, title, message, isConfirm, callback: onConfirm };
+const showDialog = (title: string, message: string, isConfirm = false, onConfirm: (() => void) | null = null, confirmText = '') => {
+    dialog.value = { visible: true, title, message, isConfirm, confirmText, callback: onConfirm };
 };
 
 // 处理插件缺失的弹窗逻辑

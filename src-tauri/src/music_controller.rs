@@ -87,6 +87,12 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
             {
                 return Some((session, app_id_str));
             }
+            // 浏览器Pro：仅识别 Edge/Chrome
+            else if target == "browser"
+                && (app_id_str.contains("edge") || app_id_str.contains("chrome"))
+            {
+                return Some((session, app_id_str));
+            }
             // 其他平台：按包名包含目标平台名匹配
             else if target != "netease" && app_id_str.contains(&target) {
                 return Some((session, app_id_str));
