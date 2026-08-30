@@ -335,10 +335,12 @@ async fn start_island_animation(
                     let current_w = start_width + (target_width - start_width) * spring;
                     let current_h = start_height + (target_height - start_height) * spring;
 
+                    // 1. 保留这俩变量，SetWindowPos 必须用到它们作为宽高参数
                     let phys_window_w = (current_w * scale_factor).round() as i32;
                     let phys_window_h = (current_h * scale_factor).round() as i32;
 
-                    let final_x = anchor_cx - phys_window_w / 2;
+                    // 2. 坐标计算：直接用浮点数除以 2，避免 i32 除法丢失 0.5 像素导致漂移
+                    let final_x = (anchor_cx as f64 - (current_w * scale_factor) / 2.0).round() as i32;
                     let final_y = anchor_cy;
 
                     unsafe {
@@ -351,6 +353,36 @@ async fn start_island_animation(
                             phys_window_h,
                             0x0014,
                         );
+                    }
+                }
+
+                // 动画结束定格的那一帧，也要使用相同的浮点计算逻辑
+                if ANIMATION_ID.load(Ordering::SeqCst) == id {
+                    let phys_target_w = (target_width * scale_factor).round() as i32;
+                    let phys_target_h = (target_height * scale_factor).round() as i32;
+
+                    let final_x = (anchor_cx as f64 - (target_width * scale_factor) / 2.0).round() as i32;
+                    let final_y = anchor_cy;
+
+                    unsafe {
+                        SetWindowPos(
+                            hwnd_raw as _,
+                            std::ptr::null_mut(),
+                            final_x,
+                            final_y,
+                            phys_target_w,
+                            phys_target_h,
+                            0x0014,
+                        );
+                    }
+                    let _ = window_clone.emit("island-resize", vec![target_width, target_height]);
+
+                    if let Ok(mut guard) = ANIMATION_ANCHOR.lock() {
+                        if let Some(anchor) = guard.as_ref() {
+                            if anchor.active_id == id {
+                                *guard = None;
+                            }
+                        }
                     }
                 }
 

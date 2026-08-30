@@ -103,8 +103,7 @@
                                 <div class="clipboard-title">检测到复制了链接</div>
                                 <div class="clipboard-link">{{ clipboardLink }}</div>
                             </div>
-                            <button class="clipboard-open-btn" @click.stop="handleOpenClipboardLink"
-                                title="打开链接">
+                            <button class="clipboard-open-btn" @click.stop="handleOpenClipboardLink" title="打开链接">
                                 <img :src="openLinkIcon" alt="打开链接" class="clipboard-open-img">
                             </button>
                         </div>
@@ -191,7 +190,7 @@
                                 <div class="res-info-row">
                                     <span class="res-label">CPU</span>
                                     <span class="res-value" :class="{ 'high-usage': cpuUsage >= 85 }">{{ cpuUsage
-                                    }}%</span>
+                                        }}%</span>
                                 </div>
                                 <div class="res-bar-track">
                                     <div class="res-bar-fill" :style="{ width: cpuUsage + '%' }"
@@ -202,7 +201,7 @@
                                 <div class="res-info-row">
                                     <span class="res-label">RAM</span>
                                     <span class="res-value" :class="{ 'high-usage': ramUsage >= 85 }">{{ ramUsage
-                                    }}%</span>
+                                        }}%</span>
                                 </div>
                                 <div class="res-bar-track">
                                     <div class="res-bar-fill" :style="{ width: ramUsage + '%' }"
@@ -2354,8 +2353,12 @@ const handleMouseMove = async (event: MouseEvent) => {
     }
 };
 
-const handleMouseUp = () => {
+const handleMouseUp = async () => {
     isMouseDown = false;
+    // 只有用户真实拖拽松手后，才保存坐标
+    if (!isPositionLocked.value) {
+        await persistWindowPosition(getCurrentWindow());
+    }
 };
 
 const handleRightClick = async (event: MouseEvent) => {
@@ -2711,33 +2714,6 @@ onMounted(async () => {
         startClipboardPolling();
     }
 
-    // 记录当前实例的启动时间戳
-    const bootTime = Date.now();
-
-    // 监听窗口移动：用户拖动停止 600ms 后保存位置（trailing 防抖）
-    let moveTimeout: number | null = null;
-
-    await appWindow.onMoved(() => {
-        if (moveTimeout) clearTimeout(moveTimeout);
-
-        moveTimeout = window.setTimeout(async () => {
-            try {
-                // 启动前 3 秒内的定位（系统/程序动作）不保存
-                if (Date.now() - bootTime < 3000) return;
-                // 形变动画期间不保存
-                if (isSizeAnimating || isMusicExpanding.value) return;
-                // 动画刚结束的滞后窗口内不保存（Rust SetWindowPos 属程序移动）
-                if (Date.now() - lastProgrammaticMoveEnd < 1500) return;
-                // 重置位置后 2 秒内不保存（防止 setPosition 未生效时把旧坐标写回缓存）
-                if (Date.now() - positionResetAt < 2000) return;
-
-                await persistWindowPosition(appWindow);
-            } catch (e) {
-                console.error('保存坐标失败:', e);
-            }
-        }, 600);
-    });
-
     window.addEventListener('blur', collapseMusic);
 
     document.addEventListener('contextmenu', (e) => {
@@ -2976,8 +2952,8 @@ onMounted(async () => {
             const finalW = realW * appScale.value;
             const finalH = realH * appScale.value;
             await appWindow.setSize(new PhysicalSize(
-                Math.ceil(finalW * scaleFactor),
-                Math.ceil(finalH * scaleFactor)
+                Math.round(finalW * scaleFactor),
+                Math.round(finalH * scaleFactor)
             ));
 
             // 期望位置（按优先级）
