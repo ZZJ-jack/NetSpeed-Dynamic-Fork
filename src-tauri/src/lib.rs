@@ -550,7 +550,7 @@ fn get_clipboard_text() -> Result<String, String> {
 fn get_active_browser_tabs() -> Result<Vec<String>, String> {
     use std::process::Command;
 
-    let script = r#"Get-Process | Where-Object { $_.MainWindowTitle -and ($_.ProcessName -match 'msedge|chrome') } | ForEach-Object { Write-Host $_.MainWindowTitle }"#;
+    let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Process | Where-Object { $_.MainWindowTitle -and ($_.ProcessName -match 'msedge|chrome') } | ForEach-Object { Write-Host $_.MainWindowTitle }"#;
 
     let output = Command::new("powershell")
         .arg("-NoProfile")

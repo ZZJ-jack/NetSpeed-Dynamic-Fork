@@ -143,7 +143,7 @@
                                                 {{ currentSongName }}
                                             </span>
                                         </div>
-                                        <div class="song-artist" v-show="!isVideoLikeSource">{{ currentArtistName }}
+                                        <div class="song-artist" v-show="!isVideoPlayer">{{ currentArtistName }}
                                         </div>
                                     </div>
                                 </div>
@@ -750,9 +750,11 @@ const coverUrl = ref('');
 const coverCache = new Map<string, string>();
 
 // 当前播放器是否为浏览器（edge/chrome），以及是否正在展示 SMTC 本地封面
-const currentIsBrowser = ref(false);
-// 当前播放器是否正在播放视频
-const currentIsVideoPlayer = ref(false);
+const currentIsBrowser = computed(() =>
+    currentAppIdStr.value.includes('edge') || currentAppIdStr.value.includes('chrome')
+);
+// 浏览器Pro标签页判定的额外结果：'music'|'video'；null 表示不做额外判定（按歌词兜底）
+const browserContentOverride = ref<'music' | 'video' | null>(null);
 const isSmtcCoverActive = ref(false);
 // 浏览器是否成功获取到封面/歌词（成功即视为播放音乐，而非视频）
 const isBrowserMusic = ref(false);
@@ -760,6 +762,35 @@ const isBrowserMusic = ref(false);
 const isBrowserVideoTitle = ref(false);
 // 当前 SMTC 来源应用的包名（用于 PotPlayer 音乐模式等封面策略判断）
 const currentAppIdStr = ref('');
+
+// 浏览器音乐/视频模式统一判定函数：整合所有浏览器信号（含浏览器Pro标签页判定），收敛到一处
+// 异步执行（内部可获取浏览器活动标签页），返回 'music'（当作音乐）或 'video'（当作视频）
+const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
+    // 0. 浏览器Pro 标签页额外判定（具体逻辑由用户实现）：
+    const tabs = await invoke<string[]>('get_active_browser_tabs');
+    const MusicKeywords = ["music", "Music", "音乐"];
+    isBrowserMusic.value = MusicKeywords.some(keyword => tabs.includes(keyword));
+    return resolveBrowserMode();
+};
+
+// 浏览器音乐/视频模式同步解析：基于已刷新的 reactive 状态，把判定收敛到一处
+// 优先级：浏览器Pro标签页判定（isBrowserMusic）→ 视频站后缀 → 浏览器Pro额外覆盖
+const resolveBrowserMode = (): 'music' | 'video' => {
+    // 1. 浏览器Pro：标签页命中音乐关键词 → 音乐；否则视为视频
+    if (isBrowserVideoTitle.value) return 'video'; // 视频站后缀 → 强制视频
+    if (browserContentOverride.value) return browserContentOverride.value; // 额外覆盖
+    return isBrowserMusic.value ? 'music' : 'video'; // 兜底：拉到歌词即音乐，否则视频
+};
+
+// 统一判定：当前播放器是否按"视频类"处理（决定是否做歌词匹配/标题常驻/封面策略）
+// 仅浏览器进入 resolveBrowserMode；其他来源（B站/PotPlayer）保持原有逻辑
+const isVideoPlayer = computed(() => {
+    if (currentIsBrowser.value) return resolveBrowserMode() === 'video';
+    const id = currentAppIdStr.value;
+    if (id.includes('bilibili')) return true; // B站：始终视频
+    if (id.includes('potplayer')) return currentArtistName.value === 'potplayer'; // PotPlayer：artist 占位=视频
+    return false; // 其他媒体默认音乐
+});
 
 // 沉浸模式专属的静态模糊封面
 const blurredCoverUrl = ref('');
@@ -1047,7 +1078,7 @@ const fillCollapsedWithTrackInfo = () => {
         return;
     }
     // 视频类播放源（B站/浏览器视频）：只显示标题，不拼歌手
-    if (isVideoLikeSource.value) {
+    if (isVideoPlayer.value) {
         setSafeTrackInfo(currentSongName.value);
         return;
     }
@@ -1397,31 +1428,17 @@ const syncMusicStatus = async () => {
 
             console.log('syncMusicStatus', song, artist, playing, positionMs, durationMs, app_id_str);
 
-            // 记录当前是否为浏览器类应用（edge/chrome)
-            currentIsBrowser.value = app_id_str.includes("edge") || app_id_str.includes("chrome");
-
-            // 记录当前是否为视频类应用（potplayer/浏览器视频），供歌词显示逻辑区分处理
-            // 浏览器：拉到歌词即视为播放音乐（isBrowserMusic），否则视为播放视频；
-            // 标题命中视频站后缀（优酷剧集）也强制视为视频
-            currentIsVideoPlayer.value = (artist === "potplayer" || app_id_str.includes("bilibili"));
-            if (!isBrowserVideoTitle.value && currentIsBrowser.value) {
-                currentIsVideoPlayer.value = !isBrowserMusic.value;
-            }
-
-            // 调试：获取浏览器实时活动标签页（浏览器模式下）
-            if (currentIsBrowser.value) {
-                try {
-                    const tabs = await invoke<string[]>('get_active_browser_tabs');
-                    console.log('Active browser tabs:', tabs);
-                } catch (e) {
-                    console.warn('获取浏览器标签页失败:', e);
-                }
-            }
-
-            // 检测 SMTC 来源应用是否发生了切换（应用包名变更），用于及时刷新歌词
+            // 先检测来源应用是否切换，并尽早记录来源包名，
+            // 让 currentIsBrowser / isVideoPlayer 等 computed 立即反映本次来源
             const appSwitched = currentAppIdStr.value !== '' && currentAppIdStr.value !== app_id_str;
-            // 记录当前 SMTC 来源应用的包名，供恢复播放时的封面刷新逻辑判断
             currentAppIdStr.value = app_id_str;
+
+            // 浏览器Pro：调用统一判定函数，刷新 browserContentOverride（并返回最终音乐/视频判定）
+            if (currentIsBrowser.value) {
+                await judgeBrowserMode().catch(() => { /* 判定失败沿用兜底 */ });
+            } else {
+                browserContentOverride.value = null;
+            }
 
             // 切换 SMTC 来源应用：立即清空旧应用残留的歌词，避免串歌词（新应用歌词就绪前先显示标题）
             if (appSwitched) {
@@ -1599,7 +1616,8 @@ const getPlayerName = () => {
         'kugou': t('kugouMusicFull'),
         'echo': 'Echo Music',
         'lx-music': t('lxMusicFull'),
-        'other': t('genericMediaFull')
+        'other': t('genericMediaFull'),
+        'browser': t('browserPro')
     };
     return map[key] || t('unknownPlatform');
 };
@@ -1630,36 +1648,22 @@ const currentTrackInfo = ref(`${t('noSongPlaying')} - ${getPlayerName()}`);
 // 此时不做歌词匹配，直接用标题当常驻歌词显示
 const isPotplayerSource = computed(() => currentArtistName.value === 'potplayer');
 
-// 视频类播放源（B站/浏览器视频/PotPlayer视频）：只显示标题、不显示歌手，标题滚动放慢
-const isVideoLikeSource = computed(() => {
-    // PotPlayer 视频模式：始终作为视频类
-    if (isPotplayerSource.value) return true;
-    // B站：始终作为视频类
-    if (currentAppIdStr.value.includes('bilibili')) return true;
-    // 浏览器：成功获取到封面/歌词即视为播放音乐，否则视为播放视频；命中视频站后缀也强制视为视频
-    if (currentIsBrowser.value) return !isBrowserMusic.value || isBrowserVideoTitle.value;
-    return false;
-});
-
-// 浏览器音乐/视频判定变化时，重新填充折叠态文本（音乐显示"标题 - 歌手"，视频只显示标题）
-watch(isVideoLikeSource, () => {
+// 视频类判定变化时，重新填充折叠态文本（音乐显示"标题 - 歌手"，视频只显示标题）
+watch(isVideoPlayer, () => {
     if (displayMusic.value && currentSongName.value !== t('noSongPlaying')) {
         fillCollapsedWithTrackInfo();
     }
 });
 
-// 浏览器判定为播放音乐（拉到歌词）时，同步把视频类标记置为 false，允许歌词显示
+// 浏览器判定为播放音乐（拉到歌词）时，封面改走网络获取（歌词元数据更准，封面也以网络为准）
+// 注意：isVideoPlayer 现为派生 computed，无需再手动同步视频标记
 watch(isBrowserMusic, (now) => {
-    if (currentIsBrowser.value) {
-        currentIsVideoPlayer.value = !now;
-        // 浏览器判定为音乐后，封面改走网络获取（歌词元数据更准，封面也以网络为准）
-        if (now) {
-            const song = currentSongName.value;
-            const artist = currentArtistName.value;
-            const trackInfo = artist ? `${song} - ${artist}` : song;
-            if (trackInfo && song && song !== t('noSongPlaying')) {
-                applyCoverForApp(trackInfo, song, artist, currentAppIdStr.value, true, true);
-            }
+    if (now && currentIsBrowser.value) {
+        const song = currentSongName.value;
+        const artist = currentArtistName.value;
+        const trackInfo = artist ? `${song} - ${artist}` : song;
+        if (trackInfo && song && song !== t('noSongPlaying')) {
+            applyCoverForApp(trackInfo, song, artist, currentAppIdStr.value, true, true);
         }
     }
 });
@@ -1775,7 +1779,7 @@ const calculateExpandedTitleScroll = () => {
 };
 
 // 标题变化、展开/折叠切换、或音乐/视频判定变化时，重新计算展开态标题的滚动
-watch([currentSongName, isMusicExpanded, isVideoLikeSource], async () => {
+watch([currentSongName, isMusicExpanded, isVideoPlayer], async () => {
     await nextTick();
     // 点击展开立即计算一次，让标题马上开始滚动（此时容器还是折叠态宽度，滚动距离偏大）
     if (isMusicExpanded.value) {
@@ -1858,7 +1862,7 @@ const calculateScroll = () => {
 
         // 视频类播放源（B站/浏览器视频）：标题常驻不随歌词变化，用固定慢速滚动，
         // 且不受歌词展示时长限制，让长标题从容滚完再回来
-        if (isVideoLikeSource.value) {
+        if (isVideoPlayer.value) {
             const slowTimeToMove = scrollDist.value / 20;
             totalDuration = slowTimeToMove / 0.7;
         } else {
@@ -2915,7 +2919,7 @@ onMounted(async () => {
 
             // 2. 毫秒级歌词匹配与队列逻辑 (解决快节奏吞字、闪烁消失问题)
             // 视频类应用（potplayer/浏览器视频）：不做歌词匹配，标题常驻显示
-            if (!currentIsVideoPlayer.value && parsedLyrics.value.length > 0) {
+            if (!isVideoPlayer.value && parsedLyrics.value.length > 0) {
                 let matchedIndex = -1;
 
                 // 找出当前时间进度应该播放哪一句
