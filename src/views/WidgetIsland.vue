@@ -796,6 +796,13 @@ const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
     return resolveBrowserMode();
 };
 
+// 同步标记：该曲目已拉到歌词，判定为音乐模式
+// - 通用媒体（非浏览器Pro）：直接生效为音乐
+// - 浏览器Pro：最终结论仍由 resolveBrowserMode 的 ② 标签页层把关（标签页未命中会判为视频，不被此标记覆盖）
+const markBrowserMusic = (): void => {
+    isBrowserMusic.value = true;
+};
+
 // 统一判定：当前播放器是否按"视频类"处理（决定是否做歌词匹配/标题常驻/封面策略）
 // 仅浏览器进入 resolveBrowserMode；其他来源（B站/PotPlayer）保持原有逻辑
 const isVideoPlayer = computed(() => {
@@ -1152,7 +1159,7 @@ const initWebSocket = async () => {
                         lastLyricChangeTime = 0; // 重置时间锁，允许立即显示第一句歌词
 
                         // 浏览器收到完整歌词 → 判定为播放音乐（而非视频）
-                        if (currentIsBrowser.value) isBrowserMusic.value = true;
+                        markBrowserMusic();
 
                         return;
                     }
@@ -1449,6 +1456,7 @@ const syncMusicStatus = async () => {
 
             // 刷新浏览器 音乐/视频 判定（内部已按浏览器Pro/非Pro分派）
             await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
+            console.log('isBrowserMusic', isBrowserMusic.value);
 
             // 切换 SMTC 来源应用：立即清空旧应用残留的歌词，避免串歌词（新应用歌词就绪前先显示标题）
             if (appSwitched) {
@@ -1541,16 +1549,16 @@ const syncMusicStatus = async () => {
 
                 // 仅在 WS 不活跃时，发起 HTTP 网络歌词兜底（PotPlayer 不拉歌词，标题常驻）
                 // 切换 SMTC 应用后 WS 心跳可能仍属于旧应用，此时也立即用 HTTP 兜底，保证新歌歌词及时到位
-                // 标题命中视频站后缀（优酷剧集）不拉歌词，保持视频模式
+                // 标题命中视频站后缀不拉歌词，保持视频模式
                 if ((!isWsActive || appSwitched) && !isPotplayerSource.value && !isBrowserVideoTitle.value) {
                     invoke<string>('fetch_netease_lyrics', { songName: song, artistName: artist, durationMs })
-                        .then(lrc => {
+                        .then(async (lrc) => {
                             if (appSwitched || Date.now() - lastWsLyricTime > 3000) {
                                 if (lrc) {
                                     parsedLyrics.value = parseLrc(lrc);
-                                    // 浏览器拉到歌词 → 判定为播放音乐（而非视频）
                                     if (currentIsBrowser.value) {
-                                        isBrowserMusic.value = true;
+                                        // 浏览器Pro：先做标签页判定，通过（标签页命中音乐）才判定为音乐模式
+                                        await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
                                         // 浏览器：用后端提取的标题/歌手覆盖 SMTC 提供的标题/歌手
                                         invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
                                             .then(([title, artist]) => {
@@ -1567,6 +1575,9 @@ const syncMusicStatus = async () => {
                                                     applyCoverForApp(trackInfo, title, finalArtist, currentAppIdStr.value, true, true);
                                                 }
                                             }).catch(() => { });
+                                    } else {
+                                        // 通用媒体（非浏览器Pro）：拉到歌词直接判定为音乐
+                                        markBrowserMusic();
                                     }
                                     // 刚拉到歌词时，若时长仍为 0，用歌词反推补救
                                     if (currentDurationMs.value <= 0 && parsedLyrics.value.length > 0) {
