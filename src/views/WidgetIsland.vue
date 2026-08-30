@@ -1373,9 +1373,6 @@ const BROWSER_VIDEO_SUFFIX_RE = [
     /-音乐-高清完整正版视频在线观看-优酷\s*$/i,
 ];
 
-// 统一判定：标题是否命中任一视频站后缀（浏览器 → 视频模式）
-const matchesBrowserVideoSuffix = (title: string) => BROWSER_VIDEO_SUFFIX_RE.some(re => re.test(title));
-
 // 统一后缀删除函数：去掉标题里的所有视频站后缀及残留分隔符
 const cleanSongTitle = (title: string) => {
     let s = title;
@@ -1395,22 +1392,34 @@ const syncMusicStatus = async () => {
 
         if (res) {
             const [rawSong, artist, playing, positionMs, durationMs, app_id_str] = res;
+
             // 标题命中任一视频站后缀（B站/优酷等）→ 强制判定为浏览器视频模式（用清理前的原始标题判断）
-            isBrowserVideoTitle.value = matchesBrowserVideoSuffix(rawSong);
             // 统一清理标题：删除视频站后缀，展示与搜索都用干净标题
             const song = cleanSongTitle(rawSong);
+            isBrowserVideoTitle.value = song !== rawSong;
+
             console.log('syncMusicStatus', song, artist, playing, positionMs, durationMs, app_id_str);
 
-            // 记录当前是否为浏览器类应用（edge/chrome），供封面刷新逻辑区分处理
-            if (artist === "edge" || artist === "chrome") {
-                currentIsBrowser.value =
-                    app_id_str.includes("edge") || app_id_str.includes("chrome");
-            }
+            // 记录当前是否为浏览器类应用（edge/chrome)
+            currentIsBrowser.value = app_id_str.includes("edge") || app_id_str.includes("chrome");
 
             // 记录当前是否为视频类应用（potplayer/浏览器视频），供歌词显示逻辑区分处理
             // 浏览器：拉到歌词即视为播放音乐（isBrowserMusic），否则视为播放视频；
             // 标题命中视频站后缀（优酷剧集）也强制视为视频
-            currentIsVideoPlayer.value = (artist === "potplayer" || app_id_str.includes("bilibili") || (currentIsBrowser.value && !isBrowserMusic.value) || isBrowserVideoTitle.value);
+            currentIsVideoPlayer.value = (artist === "potplayer" || app_id_str.includes("bilibili"));
+            if (!isBrowserVideoTitle.value && currentIsBrowser.value) {
+                currentIsVideoPlayer.value = !isBrowserMusic.value;
+            }
+
+            // 调试：获取浏览器实时活动标签页（浏览器模式下）
+            if (currentIsBrowser.value) {
+                try {
+                    const tabs = await invoke<string[]>('get_active_browser_tabs');
+                    console.log('Active browser tabs:', tabs);
+                } catch (e) {
+                    console.warn('获取浏览器标签页失败:', e);
+                }
+            }
 
             // 检测 SMTC 来源应用是否发生了切换（应用包名变更），用于及时刷新歌词
             const appSwitched = currentAppIdStr.value !== '' && currentAppIdStr.value !== app_id_str;

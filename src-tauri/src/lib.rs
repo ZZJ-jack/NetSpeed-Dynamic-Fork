@@ -511,6 +511,46 @@ fn get_clipboard_text() -> Result<String, String> {
     Ok(String::new())
 }
 
+/// 获取浏览器实时活动标签页（当前窗口标题，即活动标签标题）
+/// Windows 上通过 PowerShell 枚举 msedge/chrome 进程的主窗口标题实现。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_active_browser_tabs() -> Result<Vec<String>, String> {
+    use std::process::Command;
+
+    let script = r#"Get-Process | Where-Object { $_.MainWindowTitle -and ($_.ProcessName -match 'msedge|chrome') } | ForEach-Object { Write-Host $_.MainWindowTitle }"#;
+
+    let output = Command::new("powershell")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("执行 PowerShell 失败: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "PowerShell 执行失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tabs: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    Ok(tabs)
+}
+
+// 非 Windows 平台空实现，避免编译报错
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_active_browser_tabs() -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
 // 缓存 AppHandle 供剪贴板监听线程的窗口过程使用
 #[cfg(target_os = "windows")]
 static CLIPBOARD_EMITTER: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -649,6 +689,7 @@ pub fn run() {
             toggle_fps_plugin,
             sync_tray_menu,
             get_clipboard_text,
+            get_active_browser_tabs,
         ])
         .setup(|app| {
             audio_spectrum::start_monitor();
