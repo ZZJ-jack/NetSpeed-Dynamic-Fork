@@ -763,23 +763,37 @@ const isBrowserVideoTitle = ref(false);
 // 当前 SMTC 来源应用的包名（用于 PotPlayer 音乐模式等封面策略判断）
 const currentAppIdStr = ref('');
 
-// 浏览器音乐/视频模式统一判定函数：整合所有浏览器信号（含浏览器Pro标签页判定），收敛到一处
-// 异步执行（内部可获取浏览器活动标签页），返回 'music'（当作音乐）或 'video'（当作视频）
-const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
-    // 0. 浏览器Pro 标签页额外判定（具体逻辑由用户实现）：
-    const tabs = await invoke<string[]>('get_active_browser_tabs');
-    const MusicKeywords = ["music", "Music", "音乐"];
-    isBrowserMusic.value = MusicKeywords.some(keyword => tabs.includes(keyword));
-    return resolveBrowserMode();
+// ===== 浏览器 音乐/视频 判定（统一入口）=====
+// 判定优先级（高→低）：视频站标题后缀 > 浏览器Pro标签页关键词 > 拉到歌词兜底
+// 所有判定状态集中收敛，任何调用点都只问这两个函数，不再散落各自判断。
+
+// 同步中枢：基于当前 reactive 状态立即得出音乐/视频结论
+// 供 isVideoPlayer 同步使用；也作为 judgeBrowserMode 的最终返回
+const resolveBrowserMode = (): 'music' | 'video' => {
+    if (isBrowserVideoTitle.value) return 'video';          // ① 标题命中视频站后缀 → 强制视频
+    if (browserContentOverride.value) return browserContentOverride.value; // ② 浏览器Pro标签页判定
+    return isBrowserMusic.value ? 'music' : 'video';        // ③ 兜底：拉到歌词即音乐，否则视频
 };
 
-// 浏览器音乐/视频模式同步解析：基于已刷新的 reactive 状态，把判定收敛到一处
-// 优先级：浏览器Pro标签页判定（isBrowserMusic）→ 视频站后缀 → 浏览器Pro额外覆盖
-const resolveBrowserMode = (): 'music' | 'video' => {
-    // 1. 浏览器Pro：标签页命中音乐关键词 → 音乐；否则视为视频
-    if (isBrowserVideoTitle.value) return 'video'; // 视频站后缀 → 强制视频
-    if (browserContentOverride.value) return browserContentOverride.value; // 额外覆盖
-    return isBrowserMusic.value ? 'music' : 'video'; // 兜底：拉到歌词即音乐，否则视频
+// 刷新函数：先刷新浏览器Pro的标签页额外判定，再返回统一结论
+// 浏览器Pro会读活动标签页：命中音乐关键词 → 记为该曲目是音乐（同时写入 override 供统一判定）；
+// 非浏览器Pro（或读取失败）→ override 置 null，退回歌词兜底，保证行为与旧逻辑一致
+const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
+    if (currentIsBrowser.value) {
+        // 浏览器Pro 专属分支：额外读取活动标签页做关键词判定
+        try {
+            const tabs = await invoke<string[]>('get_active_browser_tabs');
+            const MusicKeywords = ['music', 'Music', '音乐'];
+            const isMusic = MusicKeywords.some(keyword => tabs.includes(keyword));
+            isBrowserMusic.value = isMusic;                 // 封面/标题策略沿用此信号
+            browserContentOverride.value = isMusic ? 'music' : 'video';
+        } catch {
+            browserContentOverride.value = null; // 标签页读取失败 → 不做额外判定，走歌词兜底
+        }
+    } else {
+        browserContentOverride.value = null; // 非浏览器Pro：无标签页信号
+    }
+    return resolveBrowserMode();
 };
 
 // 统一判定：当前播放器是否按"视频类"处理（决定是否做歌词匹配/标题常驻/封面策略）
@@ -1433,12 +1447,8 @@ const syncMusicStatus = async () => {
             const appSwitched = currentAppIdStr.value !== '' && currentAppIdStr.value !== app_id_str;
             currentAppIdStr.value = app_id_str;
 
-            // 浏览器Pro：调用统一判定函数，刷新 browserContentOverride（并返回最终音乐/视频判定）
-            if (currentIsBrowser.value) {
-                await judgeBrowserMode().catch(() => { /* 判定失败沿用兜底 */ });
-            } else {
-                browserContentOverride.value = null;
-            }
+            // 刷新浏览器 音乐/视频 判定（内部已按浏览器Pro/非Pro分派）
+            await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
 
             // 切换 SMTC 来源应用：立即清空旧应用残留的歌词，避免串歌词（新应用歌词就绪前先显示标题）
             if (appSwitched) {
@@ -1571,6 +1581,11 @@ const syncMusicStatus = async () => {
                 // 同一首歌，仅在 WS 不活跃时使用 SMTC 进度校准
                 if (!isWsActive && positionMs > 1000 && Math.abs(positionMs - localPositionMs.value) > 800) {
                     localPositionMs.value = positionMs - 250;
+                }
+                // 修复：SMTC 短暂无返回会往折叠态写入"未在播放歌曲"，同歌恢复后需重新填充标题，
+                // 否则 currentTrackInfo 一直卡在"未在播放"，而展开态（currentSongName）仍正常
+                if (currentTrackInfo.value.startsWith(t('noSongPlaying'))) {
+                    fillCollapsedWithTrackInfo();
                 }
                 // 封面被清空过（如 SMTC 短暂断开）但沉浸背景还在时，补回圆形封面，避免"背景对、圆形空白"
                 if (!coverUrl.value && blurredCoverUrl.value) {
