@@ -65,7 +65,7 @@ const messages = {
         cancel: '取消',
         confirm: '确定',
         browserPro: '浏览器Pro',
-        browserProDesc: '浏览器Pro模式在通用媒体模式基础上增强了对浏览器SMTC的识别，更加精准识别音乐/视频，目前仅对Edge、Chrome浏览器做支持，可能存在误判情况，欢迎体验',
+        browserProDesc: '浏览器Pro模式在通用媒体模式的基础上，新增了对浏览器当前标签页标题的获取。采用对主流视频平台+主流音乐平台进行关键词识别的机制，旨在优化浏览器的SMTC识别精确度。目前仅对Edge、Chrome浏览器做测试以及适配。如有误判情况，欢迎在QQ群或Github Issue、腾讯文档里反馈',
         gotIt: '明白',
         settingFailedTitle: '设置失败',
         autoStartFailed: '无法修改开机自启动状态，请检查系统权限。',

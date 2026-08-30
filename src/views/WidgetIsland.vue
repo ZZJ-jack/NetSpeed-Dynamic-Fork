@@ -779,18 +779,19 @@ const resolveBrowserMode = (): 'music' | 'video' => {
 };
 
 // 刷新函数：先刷新浏览器Pro的标签页额外判定，再返回统一结论
-// 浏览器Pro模式（用户选了browser平台 且 SMTC来源是浏览器）才读活动标签页做关键词判定；
+// 浏览器Pro模式（用户选了browserPro平台 且 SMTC来源是浏览器）才读活动标签页做关键词判定；
 // 否则（通用媒体/未选浏览器Pro）→ override 置 null，退回歌词兜底，保证行为与旧逻辑一致
 const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
     if (isBrowserProMode() && currentIsBrowser.value) {
         // 浏览器Pro 专属分支：额外读取活动标签页做关键词判定
         try {
             const tabs = await invoke<string[]>('get_active_browser_tabs');
-            const MusicKeywords = ['music', 'Music', '音乐'];
+            const VideoKeywords = ['bilibili', '哔哩哔哩', 'qqlive', '腾讯视频', 'youku', '优酷', 'youtube', 'iqiyi', '爱奇艺', '芒果tv', 'tv', '芒果TV', '影视', 'Tv', 'TV', 'cctv', 'CCTV', '央视'];
+            const MusicKeywords = ['music', 'Music', '音乐', 'spotify', 'Spotify'];
+            const isVideo = VideoKeywords.some(keyword => tabs.includes(keyword));
             const isMusic = MusicKeywords.some(keyword => tabs.includes(keyword));
-            console.log('isMusic', isMusic);
-            isBrowserMusic.value = isMusic;                 // 封面/标题策略沿用此信号
-            browserContentOverride.value = isMusic ? 'music' : 'video';
+            isBrowserMusic.value = !isVideo || isMusic; // 封面/标题策略沿用此信号
+            browserContentOverride.value = isBrowserMusic.value ? 'music' : 'video';
         } catch {
             browserContentOverride.value = null; // 标签页读取失败 → 不做额外判定，走歌词兜底
         }
@@ -1469,8 +1470,6 @@ const syncMusicStatus = async () => {
             // 统一清理标题：删除视频站后缀，展示与搜索都用干净标题
             const song = cleanSongTitle(rawSong);
             isBrowserVideoTitle.value = song !== rawSong;
-
-            console.log('syncMusicStatus', song, artist, playing, positionMs, durationMs, app_id_str);
 
             // 先检测来源应用是否切换，并尽早记录来源包名，
             // 让 currentIsBrowser / isVideoPlayer 等 computed 立即反映本次来源
