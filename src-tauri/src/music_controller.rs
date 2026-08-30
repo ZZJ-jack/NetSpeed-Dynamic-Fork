@@ -88,7 +88,7 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
                 return Some((session, app_id_str));
             }
             // 浏览器Pro：基于通用媒体模式，识别所有媒体（不限定 Edge/Chrome）
-            else if target == "browser" {
+            else if target == "browserPro" {
                 return Some((session, app_id_str));
             }
             // 其他平台：按包名包含目标平台名匹配

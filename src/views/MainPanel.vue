@@ -278,7 +278,7 @@
                                                 <template v-else-if="targetPlayer === 'lx-music'"><img
                                                         src="../assets/lxmusic.png" class="platform-icon"> {{
                                                             t('lxMusic') }}</template>
-                                                <template v-else-if="targetPlayer === 'browser'">
+                                                <template v-else-if="targetPlayer === 'browserPro'">
                                                     <img src="../assets/edge-logo.png" class="platform-icon">
                                                     {{ t('browserPro') }}</template>
                                                 <template v-else-if="targetPlayer === 'other'">
@@ -338,8 +338,8 @@
                                                         t('lxMusic') }}
                                                 </div>
                                                 <div class="dropdown-item"
-                                                    :class="{ 'is-active': targetPlayer === 'browser' }"
-                                                    @click="handleSelectPlayer('browser')">
+                                                    :class="{ 'is-active': targetPlayer === 'browserPro' }"
+                                                    @click="handleSelectPlayer('browserPro')">
                                                     <img src="../assets/edge-logo.png" class="platform-icon">
                                                     {{ t('browserPro') }}
                                                 </div>
@@ -916,7 +916,7 @@ const handleSelectPlayer = (player: string) => {
     isPlayerDropdownOpen.value = false;
 
     // 浏览器Pro模式：首次选择时弹出说明弹窗
-    if (player === 'browser') {
+    if (player === 'browserPro') {
         showDialog(
             t('browserPro'),
             t('browserProDesc'),

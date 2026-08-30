@@ -749,10 +749,13 @@ const convertWs12To7 = (bands12: number[]): number[] => {
 const coverUrl = ref('');
 const coverCache = new Map<string, string>();
 
-// 当前播放器是否为浏览器（edge/chrome），以及是否正在展示 SMTC 本地封面
+// 当前 SMTC 来源应用是否为浏览器（edge/chrome）——仅表示"正在用浏览器播放"，不等于浏览器Pro模式
 const currentIsBrowser = computed(() =>
     currentAppIdStr.value.includes('edge') || currentAppIdStr.value.includes('chrome')
 );
+// 用户是否在设置中选择了"浏览器Pro"媒体模式（与 SMTC 来源无关）
+// 浏览器Pro=用户主动选择 browserPro 平台 + 实际 SMTC 来源是浏览器，两者都满足才算数
+const isBrowserProMode = () => localStorage.getItem('nsd_target_player') === 'browserPro';
 // 浏览器Pro标签页判定的额外结果：'music'|'video'；null 表示不做额外判定（按歌词兜底）
 const browserContentOverride = ref<'music' | 'video' | null>(null);
 const isSmtcCoverActive = ref(false);
@@ -776,10 +779,10 @@ const resolveBrowserMode = (): 'music' | 'video' => {
 };
 
 // 刷新函数：先刷新浏览器Pro的标签页额外判定，再返回统一结论
-// 浏览器Pro会读活动标签页：命中音乐关键词 → 记为该曲目是音乐（同时写入 override 供统一判定）；
-// 非浏览器Pro（或读取失败）→ override 置 null，退回歌词兜底，保证行为与旧逻辑一致
+// 浏览器Pro模式（用户选了browser平台 且 SMTC来源是浏览器）才读活动标签页做关键词判定；
+// 否则（通用媒体/未选浏览器Pro）→ override 置 null，退回歌词兜底，保证行为与旧逻辑一致
 const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
-    if (currentIsBrowser.value) {
+    if (isBrowserProMode() && currentIsBrowser.value) {
         // 浏览器Pro 专属分支：额外读取活动标签页做关键词判定
         try {
             const tabs = await invoke<string[]>('get_active_browser_tabs');
@@ -791,7 +794,7 @@ const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
             browserContentOverride.value = null; // 标签页读取失败 → 不做额外判定，走歌词兜底
         }
     } else {
-        browserContentOverride.value = null; // 非浏览器Pro：无标签页信号
+        browserContentOverride.value = null; // 非浏览器Pro：无标签页信号，交给歌词兜底
     }
     return resolveBrowserMode();
 };
@@ -1456,7 +1459,6 @@ const syncMusicStatus = async () => {
 
             // 刷新浏览器 音乐/视频 判定（内部已按浏览器Pro/非Pro分派）
             await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
-            console.log('isBrowserMusic', isBrowserMusic.value);
 
             // 切换 SMTC 来源应用：立即清空旧应用残留的歌词，避免串歌词（新应用歌词就绪前先显示标题）
             if (appSwitched) {
@@ -1556,7 +1558,7 @@ const syncMusicStatus = async () => {
                             if (appSwitched || Date.now() - lastWsLyricTime > 3000) {
                                 if (lrc) {
                                     parsedLyrics.value = parseLrc(lrc);
-                                    if (currentIsBrowser.value) {
+                                    if (isBrowserProMode() && currentIsBrowser.value) {
                                         // 浏览器Pro：先做标签页判定，通过（标签页命中音乐）才判定为音乐模式
                                         await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
                                         // 浏览器：用后端提取的标题/歌手覆盖 SMTC 提供的标题/歌手
@@ -1576,7 +1578,7 @@ const syncMusicStatus = async () => {
                                                 }
                                             }).catch(() => { });
                                     } else {
-                                        // 通用媒体（非浏览器Pro）：拉到歌词直接判定为音乐
+                                        // 通用媒体（含未选浏览器Pro的浏览器播放）：拉到歌词直接判定为音乐，不改 SMTC 标题/歌手/封面
                                         markBrowserMusic();
                                     }
                                     // 刚拉到歌词时，若时长仍为 0，用歌词反推补救
@@ -1643,7 +1645,7 @@ const getPlayerName = () => {
         'echo': 'Echo Music',
         'lx-music': t('lxMusicFull'),
         'other': t('genericMediaFull'),
-        'browser': t('browserPro')
+        'browserPro': t('browserPro')
     };
     return map[key] || t('unknownPlatform');
 };
