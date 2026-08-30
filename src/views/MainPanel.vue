@@ -297,7 +297,7 @@
                                         </div>
 
                                         <transition name="dropdown">
-                                            <div class="dropdown-menu" v-show="isPlayerDropdownOpen">
+                                            <div class="dropdown-menu player-menu" v-show="isPlayerDropdownOpen">
                                                 <div class="dropdown-item"
                                                     :class="{ 'is-active': targetPlayer === 'netease' }"
                                                     @click="handleSelectPlayer('netease')">
@@ -350,7 +350,7 @@
                                                         <path
                                                             d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" />
                                                     </svg>
-                                                    {{ t('otherMediaControl') }}
+                                                    {{ t('genericMedia') }}
                                                 </div>
                                             </div>
                                         </transition>
@@ -2574,8 +2574,8 @@ input:disabled+.slider {
     border: 1px solid var(--select-border);
     border-radius: 8px;
     cursor: pointer;
-    width: 105px;
-    /* 固定紧凑宽度 */
+    width: 120px;
+    /* 固定紧凑宽度，右缘对齐容器，加宽时向左延伸 */
     box-sizing: border-box;
     transition: all 0.2s ease;
 }
@@ -2635,6 +2635,12 @@ input:disabled+.slider {
     gap: 2px;
     max-height: 140px;
     overflow-y: auto;
+}
+
+/* 播放器菜单有 9 项，全高展开会超出窗口底部被裁剪（末项只能点到上半部分），
+   故限制得更矮，保证菜单整体落在窗口可视区内；内容可滚动查看 */
+.dropdown-menu.player-menu {
+    max-height: 112px;
 }
 
 /* 隐藏原生粗糙的滚动条，替换为你主题风格的细线条 */

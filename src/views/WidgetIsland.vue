@@ -788,6 +788,7 @@ const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
             const tabs = await invoke<string[]>('get_active_browser_tabs');
             const MusicKeywords = ['music', 'Music', '音乐'];
             const isMusic = MusicKeywords.some(keyword => tabs.includes(keyword));
+            console.log('isMusic', isMusic);
             isBrowserMusic.value = isMusic;                 // 封面/标题策略沿用此信号
             browserContentOverride.value = isMusic ? 'music' : 'video';
         } catch {
@@ -1560,23 +1561,26 @@ const syncMusicStatus = async () => {
                                     parsedLyrics.value = parseLrc(lrc);
                                     if (isBrowserProMode() && currentIsBrowser.value) {
                                         // 浏览器Pro：先做标签页判定，通过（标签页命中音乐）才判定为音乐模式
-                                        await judgeBrowserMode().catch(() => { /* 判定失败沿用歌词兜底 */ });
-                                        // 浏览器：用后端提取的标题/歌手覆盖 SMTC 提供的标题/歌手
-                                        invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
-                                            .then(([title, artist]) => {
-                                                if (title) {
-                                                    // 浏览器：优先采用 SMTC 歌曲字符串里提取的歌手（更贴近浏览器实际播放的元数据），
-                                                    // 仅当 SMTC 里没有歌手时才回退用 fetch_song_meta 返回的歌手
-                                                    let finalArtist = extractArtistFromSmtc(song);
-                                                    if (!finalArtist) finalArtist = artist;
-                                                    currentSongName.value = title;
-                                                    currentArtistName.value = finalArtist || t('unknownArtist');
-                                                    fillCollapsedWithTrackInfo();
-                                                    // 用正确的歌名/歌手重新获取封面（此前 watch(isBrowserMusic) 用的是 SMTC 原始值）
-                                                    const trackInfo = finalArtist ? `${title} - ${finalArtist}` : title;
-                                                    applyCoverForApp(trackInfo, title, finalArtist, currentAppIdStr.value, true, true);
-                                                }
-                                            }).catch(() => { });
+                                        const mode = await judgeBrowserMode().catch((): 'music' | 'video' => 'music'); // 判定失败沿用歌词兜底
+                                        // 标签页未命中音乐（判定为视频）→ 不动 SMTC 标题/歌手/封面，保持原样
+                                        if (mode === 'music') {
+                                            // 浏览器：用后端提取的标题/歌手覆盖 SMTC 提供的标题/歌手
+                                            invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
+                                                .then(([title, artist]) => {
+                                                    if (title) {
+                                                        // 浏览器：优先采用 SMTC 歌曲字符串里提取的歌手（更贴近浏览器实际播放的元数据），
+                                                        // 仅当 SMTC 里没有歌手时才回退用 fetch_song_meta 返回的歌手
+                                                        let finalArtist = extractArtistFromSmtc(song);
+                                                        if (!finalArtist) finalArtist = artist;
+                                                        currentSongName.value = title;
+                                                        currentArtistName.value = finalArtist || t('unknownArtist');
+                                                        fillCollapsedWithTrackInfo();
+                                                        // 用正确的歌名/歌手重新获取封面（此前 watch(isBrowserMusic) 用的是 SMTC 原始值）
+                                                        const trackInfo = finalArtist ? `${title} - ${finalArtist}` : title;
+                                                        applyCoverForApp(trackInfo, title, finalArtist, currentAppIdStr.value, true, true);
+                                                    }
+                                                }).catch(() => { });
+                                        }
                                     } else {
                                         // 通用媒体（含未选浏览器Pro的浏览器播放）：拉到歌词直接判定为音乐，不改 SMTC 标题/歌手/封面
                                         markBrowserMusic();
