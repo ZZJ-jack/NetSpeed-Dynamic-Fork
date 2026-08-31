@@ -838,19 +838,25 @@ const parsePlayingTabTitle = (tabs: string[]): { song: string; artist: string } 
 
 // 已按"歌名|歌手"搜索过元数据的缓存键：同一首歌只搜一次，避免每 2s 轮询反复请求后端搜索
 let lastTabMetaSearchKey = '';
+// 最近一次 judgeBrowserMode 的标签页正则命中结果（每次判定开头重置，未命中保持 null）：
+// 供歌词回调判断"正则是否已命中并搜索过一次元数据"，避免再用 SMTC 原始值重复搜索导致歌手乱跳
+let lastTabPlayingResult: { song: string; artist: string } | null = null;
 
 // 刷新函数：先刷新浏览器Pro的标签页额外判定，再返回统一结论
 // 浏览器Pro模式（用户选了browserPro平台 且 SMTC来源是浏览器）才读活动标签页做关键词判定；
 // 否则（通用媒体/未选浏览器Pro）→ override 置 null，退回歌词兜底，保证行为与旧逻辑一致
-const judgeBrowserMode = async (durationMs = 0): Promise<'music' | 'video'> => {
+const judgeBrowserMode = async (song = '', durationMs = 0): Promise<'music' | 'video'> => {
+    lastTabPlayingResult = null; // 每次判定重置，未命中保持 null，命中的在下方赋值
     if (isBrowserProMode() && currentIsBrowser.value) {
         // 浏览器Pro 专属分支：额外读取活动标签页做判定
         try {
             const tabs = await invoke<string[]>('get_active_browser_tabs');
-            // ① 高优先级：标签页标题命中"正在播放: 歌名 - 歌手"→ 提取歌名/歌手搜索；
-            //    拿到结果就用 fetch_song_meta 覆盖歌名/歌手/封面，并直接判定为音乐（优先于关键词判定）
-            const playing = parsePlayingTabTitle(tabs);
+            // ① 高优先级：标签页标题（以及 SMTC 标题，作为一条"伪标签页"）命中正则 →
+            //    提取歌名/歌手搜索；拿到结果就用 fetch_song_meta 覆盖歌名/歌手/封面，并直接判定为音乐（优先于关键词判定）
+            //    正则匹配只在浏览器Pro模式下生效
+            const playing = parsePlayingTabTitle(song ? [song, ...tabs] : tabs);
             if (playing) {
+                lastTabPlayingResult = playing;
                 isBrowserMusic.value = true;
                 browserContentOverride.value = 'music';
                 const searchKey = `${playing.song}|${playing.artist}`;
@@ -889,12 +895,20 @@ const applyBrowserMusicMeta = (song: string, artist: string, durationMs: number)
     invoke<[string, string]>('fetch_song_meta', { songName: song, artistName: artist, durationMs })
         .then(([metaTitle, metaArtist]) => {
             if (!metaTitle) return;
-            // 优先采用 SMTC 歌曲字符串里提取的歌手（更贴近浏览器实际播放的元数据），
-            // 仅当 SMTC 里没有歌手时才回退用 fetch_song_meta 返回的歌手
-            let finalArtist = extractArtistFromSmtc(song);
-            if (!finalArtist) finalArtist = metaArtist;
+            // 歌手优先级：传入的歌手（浏览器Pro下由标签页正则解析得出）> 后端搜索到的歌手；
+            // 占位歌手（edge/chrome/potplayer/bilibili）与平台名（如"网易云音乐"，TAB_MUSIC_PLATFORM_RE 命中）都视为无歌手，
+            // 回退用后端 fetch_song_meta 返回的歌手，避免平台名被当歌手显示、并连带污染封面搜索
+            const finalArtist = artist && !TAB_MUSIC_PLATFORM_RE.test(artist) && !/^(edge|chrome|potplayer|bilibili)$/i.test(artist.trim()) ? artist : metaArtist;
+            const displayArtist = finalArtist || t('unknownArtist');
+            // 强制置为音乐模式：元数据修正只在音乐判定成立时发生，但 isBrowserMusic 可能在切歌时被复位，
+            // 若不强制，封面会走 SMTC 分支（浏览器 SMTC 通常无封面）导致一直显示默认图标
+            isBrowserMusic.value = true;
+            // 后端解析出的歌名/歌手与当前显示一致（如同首歌重复触发、SMTC 标题只是格式变化）→ 不重复修改显示与封面
+            if (metaTitle === currentSongName.value && displayArtist === currentArtistName.value) {
+                return;
+            }
             currentSongName.value = metaTitle;
-            currentArtistName.value = finalArtist || t('unknownArtist');
+            currentArtistName.value = displayArtist;
             fillCollapsedWithTrackInfo();
             // 用正确的歌名/歌手重新获取封面（此前 watch(isBrowserMusic) 用的是 SMTC 原始值）
             const trackInfo = finalArtist ? `${metaTitle} - ${finalArtist}` : metaTitle;
@@ -941,11 +955,20 @@ const bakeBlurImage = (url: string): Promise<string> => {
 // 网络与 SMTC 两条路径共用，保证任意来源的过期结果都会被丢弃
 let coverReqSeq = 0;
 
+// 记录最近一次"切歌"时刻与"真实封面被应用"的时刻：
+// 若当前显示的真实封面是在本首歌开始之后才应用的，说明它是本首歌的封面，
+// 晚到的兜底逻辑（如 SMTC 重试循环约 3s 后、延迟重试）不应再把它覆盖成默认图标
+// （否则会出现"先音乐封面后 edge 图标"的闪跳）
+let songChangeTime = 0;
+let lastRealCoverApplyTime = 0;
+
 // 把拿到的封面写入状态 + 缓存 + 烘焙模糊封面（网络与 SMTC 两条路径的公共落点）
 // onlyIfChanged=true 且新封面与当前显示相同 → 不应用（恢复播放时避免无意义刷新）
 const applyCoverToState = async (trackInfo: string, url: string, onlyIfChanged: boolean) => {
     if (onlyIfChanged && url === coverUrl.value) return;
     coverUrl.value = url;
+    // 记录真实（非占位）封面被应用的时刻，供 fallbackBrowserLogo 判断"当前封面是否本首歌拉到的"
+    if (!isCoverPlaceholder(url)) lastRealCoverApplyTime = Date.now();
     // 缓存超过 50 条时整体清空，防止内存无限增长
     if (coverCache.size > 50) {
         coverCache.clear();
@@ -968,6 +991,7 @@ const applyCachedCover = (trackInfo: string, onlyIfChanged: boolean, mySeq: numb
     const cached = coverCache.get(trackInfo)!;
     if (!onlyIfChanged || cached !== coverUrl.value) {
         coverUrl.value = cached;
+        if (!isCoverPlaceholder(cached)) lastRealCoverApplyTime = Date.now();
         blurredCoverUrl.value = blurredCoverCache.get(trackInfo) || '';
     }
     return true;
@@ -985,10 +1009,14 @@ const fetchAndApplyCover = async (trackInfo: string, song: string, artist: strin
         const url = await invoke<string>('get_random_cover_url', { songName: song, artistName: artist, preferSmtc });
         // 期间已切到新内容，丢弃过期结果
         if (mySeq !== coverReqSeq) return;
+        // 同曲目精修（onlyIfChanged=true）时，后端返回占位图但当前已是真实封面 → 保留现有封面，
+        // 避免真实封面被"无封面占位 SVG / 默认图标"覆盖（如封面源超时返回占位图）
+        if (onlyIfChanged && isCoverPlaceholder(url) && !isCoverPlaceholder(coverUrl.value)) return;
         await applyCoverToState(trackInfo, url, onlyIfChanged);
     } catch (e) {
         // 仅当仍是当前请求且允许清空时，才清空封面（切歌时清空，恢复播放时保留现有封面）
-        if (mySeq === coverReqSeq && clearOnError) {
+        // 同曲目精修（onlyIfChanged=true）且当前已是真实封面时不清空，避免网络抖动把真实封面清成默认图标
+        if (mySeq === coverReqSeq && clearOnError && !(onlyIfChanged && !isCoverPlaceholder(coverUrl.value))) {
             coverUrl.value = '';
             blurredCoverUrl.value = '';
         }
@@ -1058,6 +1086,12 @@ const scheduleCoverRetry = (trackInfo: string) => {
 // 浏览器 logo 兜底：设置默认图标 + 清空上首歌残留的模糊封面 + 删除当前曲目缓存（供重试强制重拉）
 // 音乐/视频模式统一入口：SMTC 或网络封面没拿到时都回退到默认图标，并排一次重试
 const fallbackBrowserLogo = (appIdStr: string, trackInfo: string) => {
+    // 若当前显示的真实封面是本首歌开始后拉到的（非占位、且应用时刻晚于切歌时刻），说明音乐封面已就绪，
+    // 不再回退默认图标——否则慢路径（isNewTrack 的 SMTC 重试循环约 3s 才走完）会在真实封面之后
+    // 又把封面盖成 edge/chrome 图标（"先音乐封面后 edge 图标"的闪跳）
+    if (!isCoverPlaceholder(coverUrl.value) && lastRealCoverApplyTime >= songChangeTime) {
+        return;
+    }
     coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
     blurredCoverUrl.value = '';
     blurredCoverCache.delete(trackInfo);
@@ -1487,23 +1521,6 @@ watch(isPlaying, (now, prev) => {
     }
 });
 
-// 从 SMTC 的歌曲字符串中提取歌手：浏览器 SMTC 的 artist 字段常为 edge/chrome 占位，
-// 真实歌手嵌在 song 字符串里（形如 "正在播放: 歌名 - 歌手"），用于歌手缺失时兜底
-const extractArtistFromSmtc = (smtcSong: string) => {
-    let s = smtcSong.trim();
-    for (const prefix of ['正在播放: ', '正在播放：', 'Now Playing: ', 'Playing: ']) {
-        if (s.startsWith(prefix)) {
-            s = s.slice(prefix.length).trim();
-            break;
-        }
-    }
-    const idx = s.lastIndexOf(' - ');
-    if (idx > 0) {
-        return s.slice(idx + 3).trim();
-    }
-    return '';
-};
-
 // 浏览器视频站标题后缀列表：命中任一后缀即判定为浏览器视频模式，并统一删除该后缀
 // 注意：判定要用清理前的原始标题（清理后后缀已被删掉，无法再判）
 const BROWSER_VIDEO_SUFFIX_RE = [
@@ -1551,8 +1568,13 @@ const syncMusicStatus = async () => {
             const appSwitched = currentAppIdStr.value !== '' && currentAppIdStr.value !== app_id_str;
             currentAppIdStr.value = app_id_str;
 
-            // 刷新浏览器 音乐/视频 判定（内部已按浏览器Pro/非Pro分派）
-            await judgeBrowserMode(durationMs).catch(() => { /* 判定失败沿用歌词兜底 */ });
+            // 刷新浏览器 音乐/视频 判定（内部已按浏览器Pro/非Pro分派；浏览器Pro下 SMTC 标题也走标签页正则）
+            await judgeBrowserMode(song, durationMs).catch(() => { /* 判定失败沿用歌词兜底 */ });
+
+            // 浏览器Pro 且标签页正则已命中音乐：SMTC 原始值（如"正在播放: xxx"/"edge"）不再反馈到前端显示，
+            // 前端保持上一次的歌名/歌手/封面，等后端 fetch_song_meta 解析出真实歌名/歌手后有变化再统一更新
+            // （关键词兜底判为音乐时 lastTabPlayingResult 为 null，此标记不成立，仍按原逻辑即时显示原始值）
+            const browserTabMusicPending = isBrowserProMode() && currentIsBrowser.value && browserContentOverride.value === 'music' && !!lastTabPlayingResult;
 
             // 切换 SMTC 来源应用：立即清空旧应用残留的歌词，避免串歌词（新应用歌词就绪前先显示标题）
             if (appSwitched) {
@@ -1598,13 +1620,17 @@ const syncMusicStatus = async () => {
             // 浏览器已判定为播放音乐时，标题/歌手由 fetch_song_meta 提供（更准），
             // 不再用 SMTC 的原始值（如"正在播放: 歌名 - 歌手" / "edge"）覆盖；
             // 但切到新内容时必须立即刷新为 SMTC 原始值，避免旧标题残留
-            if (!(currentIsBrowser.value && isBrowserMusic.value && !isNewTrack)) {
+            // 浏览器Pro 正则已命中音乐（browserTabMusicPending）时彻底不显示原始值：保持上一次显示，
+            // 等后端解析出真实歌名/歌手后由 applyBrowserMusicMeta 统一修改
+            if (!browserTabMusicPending && !(currentIsBrowser.value && isBrowserMusic.value && !isNewTrack)) {
                 currentSongName.value = song;
                 currentArtistName.value = artist || t('unknownArtist');
             }
 
             if (isNewTrack) {
                 currentBaseInfo.value = newTrackInfo;
+                // 记录切歌时刻：用于 fallbackBrowserLogo 判断当前显示封面是否本首歌拉到的（避免晚到兜底覆盖真实封面）
+                songChangeTime = Date.now();
 
                 // 切歌时重置浏览器音乐判定，等封面/歌词获取结果再确认是音乐还是视频
                 isBrowserMusic.value = false;
@@ -1641,7 +1667,11 @@ const syncMusicStatus = async () => {
                 blurredCoverCache.delete(newTrackInfo);
 
                 // 统一走集中决策函数：按应用类型分派封面策略（浏览器/PotPlayer/bilibili/JustSolo/其他）
-                applyCoverForApp(newTrackInfo, song, artist, app_id_str, false, true);
+                // 浏览器Pro 正则已命中音乐时跳过：封面保持上一次显示（前端先显示上一次的封面），
+                // 等后端元数据修正后由 applyBrowserMusicMeta 用真实歌名/歌手重新获取，避免先被原始值请求带偏
+                if (!browserTabMusicPending) {
+                    applyCoverForApp(newTrackInfo, song, artist, app_id_str, false, true);
+                }
 
                 // 仅在 WS 不活跃时，发起 HTTP 网络歌词兜底（PotPlayer 不拉歌词，标题常驻）
                 // 切换 SMTC 应用后 WS 心跳可能仍属于旧应用，此时也立即用 HTTP 兜底，保证新歌歌词及时到位
@@ -1654,10 +1684,15 @@ const syncMusicStatus = async () => {
                                     parsedLyrics.value = parseLrc(lrc);
                                     if (isBrowserProMode() && currentIsBrowser.value) {
                                         // 浏览器Pro：先做标签页判定，通过（标签页命中音乐）才判定为音乐模式
-                                        const mode = await judgeBrowserMode(durationMs).catch((): 'music' | 'video' => 'music'); // 判定失败沿用歌词兜底
+                                        const mode = await judgeBrowserMode(song, durationMs).catch((): 'music' | 'video' => 'music'); // 判定失败沿用歌词兜底
                                         // 标签页未命中音乐（判定为视频）→ 不动 SMTC 标题/歌手/封面，保持原样
                                         if (mode === 'music') {
-                                            applyBrowserMusicMeta(song, artist, durationMs);
+                                            // 标签页正则已命中（lastTabPlayingResult 非空）时，judgeBrowserMode 内部已用解析值
+                                            // 搜索过一次元数据并修正标题/歌手/封面，这里不再用 SMTC 原始值重复搜索（一次搜索即可，
+                                            // 不同查询词会返回不同结果，导致歌手乱跳）；仅当正则未命中（关键词兜底判为音乐）时才补搜一次
+                                            if (!lastTabPlayingResult) {
+                                                applyBrowserMusicMeta(song, artist, durationMs);
+                                            }
                                         }
                                     } else if (currentIsBrowser.value) {
                                         // 通用媒体 + 浏览器来源：拉到歌词直接判定为音乐，并把标题/歌手修正为真实音乐信息，封面 SMTC 优先、网络兜底
