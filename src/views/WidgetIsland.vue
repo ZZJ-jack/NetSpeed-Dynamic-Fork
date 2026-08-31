@@ -780,14 +780,27 @@ const resolveBrowserMode = (): 'music' | 'video' => {
 
 // 从浏览器窗口标题中识别音乐类标签页，返回 { song, artist }（artist 可能为空）：
 // ① "正在播放: 歌名 - 歌手"（网易云/QQ音乐等网页版）
-// ② "歌名MP3/FLAC免费下载-下载站"（音乐下载站，如"青花瓷MP3免费下载-煎饼搜音乐下载网"）
+// ② "歌名MP3/FLAC免费下载-下载站"（音乐下载站，如"青花瓷MP3免费下载-音乐下载网"）
+// ③ "歌名 - 歌手 - 平台"（如"青花瓷 - 周杰伦 - 网易云音乐"）
+// ④ "歌名 - 平台"（如"青花瓷 - 网易云音乐"，artist 留空交给搜索兜底）
 // 真实窗口标题在歌名/歌手之后还带浏览器附加的尾巴（如" - 个人 - Microsoft Edge"、" 和另外 N 个页面"、
-// " 和另外 N 个标签页"），所以 ① 取前缀后前两段为歌名/歌手并清理多标签尾巴；② 只取格式词前的歌名，artist 留空交给搜索兜底。
+// " 和另外 N 个标签页"），所以先统一清理浏览器后缀与多标签尾巴再匹配；① 取前缀后前两段为歌名/歌手；
+// ② 只取格式词前的歌名；③④ 靠标题末尾的平台词收尾来识别，分别取前两段/前一段为歌名/歌手。
+// 音乐关键词（统一数据源，统一小写）：既供 ③④ 的平台收尾匹配，也供 judgeBrowserMode ② 的标签页关键词判定复用
+const TAB_MUSIC_KEYWORDS = ['music', '音乐', 'spotify', '网易云', '云音乐', 'netease', 'qq音乐', 'qqmusic', '酷狗', 'kugou', '酷我', 'kuwo', '虾米', '咪咕', '汽水音乐', '5sing', 'apple music', 'itunes', 'youtube music', 'soundcloud', 'bandcamp', 'tidal', 'deezer', 'pandora', 'amazon music'];
+// ③④ 平台收尾判定正则（由 TAB_MUSIC_KEYWORDS 派生，大小写不敏感；词内空白用 \s* 容忍任意空格，如"Apple Music"/"AppleMusic"）
+const TAB_MUSIC_PLATFORM_RE = new RegExp(TAB_MUSIC_KEYWORDS.map(k => k.replace(/\s+/g, '\\s*')).join('|'), 'i');
 const parsePlayingTabTitle = (tabs: string[]): { song: string; artist: string } | null => {
     for (const raw of tabs) {
         console.log(raw);
         // 去掉窗口标题尾部的浏览器后缀（如" - Microsoft Edge" / " - Google Chrome"）
-        const s = raw.trim().replace(/\s*[-－–]\s*(Microsoft Edge Canary|Microsoft Edge|Google Chrome|Edge|Chrome)\s*$/i, '').trim();
+        // 以及多标签尾巴（" 和另外 N 个页面/标签页" / "and N other tabs"），统一清理后再匹配各模式
+        const s = raw.trim()
+            .replace(/\s*[-－–]\s*(Microsoft Edge Canary|Microsoft Edge|Google Chrome|Edge|Chrome)\s*$/i, '')
+            .replace(/\s*和另外\s*\d+\s*(?:个页面|个标签页)\s*$/g, '')
+            .replace(/\s+and\s+\d+\s+other\s+tabs?\s*$/gi, '')
+            .replace(/\s+/g, ' ') // 连续空白折叠为单个空格，避免"Apple  Music"这类多余空格导致平台词匹配不到
+            .trim();
         // ① 正在播放: 歌名 - 歌手
         const m = s.match(/^(正在播放|Now Playing|Playing)\s*[:：]\s*(.+)$/);
         if (m) {
@@ -807,6 +820,17 @@ const parsePlayingTabTitle = (tabs: string[]): { song: string; artist: string } 
         const m2 = s.match(/^(.+?)(?:MP3|FLAC|WAV|APE|AAC|OGG|M4A|WMA|DSD|320\s?[Kk]|无损|高品质|高音质)\s*(?:免费)?下载/i);
         if (m2) {
             return { song: m2[1].trim(), artist: '' };
+        }
+        // ③ 歌名 - 歌手 - 平台（如"青花瓷 - 周杰伦 - 网易云音乐"）
+        // 最后一段必须以平台词收尾才命中，避免把"xxx - 腾讯视频"等视频标题误判为音乐
+        const m3 = s.match(/^(.+?)\s*[-－–]\s*(.+?)\s*[-－–]\s*(.+?)\s*$/);
+        if (m3 && TAB_MUSIC_PLATFORM_RE.test(m3[3])) {
+            return { song: m3[1].trim(), artist: m3[2].trim() };
+        }
+        // ④ 歌名 - 平台（如"青花瓷 - 网易云音乐"），artist 留空交给搜索兜底
+        const m4 = s.match(/^(.+?)\s*[-－–]\s*(.+?)\s*$/);
+        if (m4 && TAB_MUSIC_PLATFORM_RE.test(m4[2])) {
+            return { song: m4[1].trim(), artist: '' };
         }
     }
     return null;
@@ -836,11 +860,11 @@ const judgeBrowserMode = async (durationMs = 0): Promise<'music' | 'video'> => {
                 }
                 return resolveBrowserMode();
             }
-            // ② 关键词判定（原有逻辑）
+            // ② 关键词判定（原有逻辑）：标题与关键词都去掉空白后做子串匹配，容忍多余空格（如"Apple  Music"/"QQ 音乐"）
             const VideoKeywords = ['bilibili', '哔哩哔哩', 'qqlive', '腾讯视频', 'youku', '优酷', 'youtube', 'iqiyi', '爱奇艺', '芒果tv', 'tv', '芒果TV', '影视', 'Tv', 'TV', 'cctv', 'CCTV', '央视'];
-            const MusicKeywords = ['music', 'Music', '音乐', 'spotify', 'Spotify'];
-            const isVideo = VideoKeywords.some(keyword => tabs.includes(keyword));
-            const isMusic = MusicKeywords.some(keyword => tabs.includes(keyword));
+            const lowerTabs = tabs.map(t => t.toLowerCase().replace(/\s+/g, ''));
+            const isVideo = VideoKeywords.some(keyword => lowerTabs.some(t => t.includes(keyword)));
+            const isMusic = TAB_MUSIC_KEYWORDS.some(keyword => lowerTabs.some(t => t.includes(keyword.replace(/\s+/g, ''))));
             isBrowserMusic.value = (!isVideo || isMusic) && isMusic !== isVideo; // 非视频站且有音乐关键词，或 音乐关键词且非视频站
             browserContentOverride.value = isBrowserMusic.value ? 'music' : 'video';
         } catch {

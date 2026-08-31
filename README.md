@@ -50,6 +50,7 @@ NetSpeed Dynamic Pro（NSD）是一个基于 Tauri 2、Vue 3、TypeScript 与 Ru
 
 - 通过 Windows SMTC API 进行上一首 / 播放暂停 / 下一首控制
 - 兼容网易云音乐、Spotify、Apple Music、QQ 音乐、酷狗音乐、Echo Music、LX Music、JustSolo 等媒体来源
+- 针对浏览器SMTC播放提供了浏览器Pro模式，使用了对主流视频平台+主流音乐平台进行关键词识别的机制，并运用正则表达式匹配窗口标题，以获取准确的歌曲信息和歌手，实现对浏览器SMTC的精确识别。（使用请确认所有浏览器一共只打开一个窗口。本功能仅对Edge、Chrome浏览器做测试以及适配，当前为beta版本。如有误判情况，欢迎在QQ群或Github Issue、腾讯文档里反馈）
 - 自动识别当前媒体会话，并优先读取 SMTC 本地封面
 - 支持封面兜底、歌词请求、歌词同步、歌词延迟调节与播放进度展示
 - 运行中支持播放状态切换、封面旋转、歌曲信息切换与歌词动画
