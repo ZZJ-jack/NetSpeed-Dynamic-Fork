@@ -26,6 +26,14 @@
 
 NetSpeed Dynamic Pro（NSD）是一个基于 Tauri 2、Vue 3、TypeScript 与 Rust 构建的 Windows 桌面应用。它将 “实时网速监控、系统资源观察、音乐控制、系统通知、任务栏插件与个性化配置” 封装在一个悬浮式 Dynamic Island 中，旨在为桌面环境提供更轻量、更顺手的状态展示与交互体验。
 
+---
+
+# 自家广告位
+👉 为了极致的性能优化和内存管理，我使用 C# + Skia 新开了一个刘海屏/灵动岛项目：[https://github.com/GEORGEWWWU/NotchPeninsula](https://github.com/GEORGEWWWU/NotchPeninsula)，实测内存占用 20-30 mb 上下！吊打Webview，体验上也不用担心，目前项目在持续开发中，感兴趣的小伙伴可以点亮一个 Star 支持一下！也非常感谢所有使用 NSD 的小伙伴，我爱你们。
+
+<img width="1200" height="608" alt="image" src="https://github.com/user-attachments/assets/7283e6ba-b94c-4a7e-ab57-88e1f5b7e4b1" />
+
+
 ## 项目亮点
 
 - 实时展示上传/下载网速，并提供本地流量统计、月度累计与趋势图
