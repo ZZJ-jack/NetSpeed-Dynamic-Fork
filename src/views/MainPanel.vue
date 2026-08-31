@@ -278,6 +278,9 @@
                                                 <template v-else-if="targetPlayer === 'lx-music'"><img
                                                         src="../assets/lxmusic.png" class="platform-icon"> {{
                                                             t('lxMusic') }}</template>
+                                                <template v-else-if="targetPlayer === 'browserPro'">
+                                                    <img src="../assets/edge-logo.png" class="platform-icon">
+                                                    {{ t('browserPro') }}</template>
                                                 <template v-else-if="targetPlayer === 'other'">
                                                     <svg viewBox="0 0 24 24" class="platform-icon" fill="currentColor">
                                                         <path
@@ -294,7 +297,7 @@
                                         </div>
 
                                         <transition name="dropdown">
-                                            <div class="dropdown-menu" v-show="isPlayerDropdownOpen">
+                                            <div class="dropdown-menu player-menu" v-show="isPlayerDropdownOpen">
                                                 <div class="dropdown-item"
                                                     :class="{ 'is-active': targetPlayer === 'netease' }"
                                                     @click="handleSelectPlayer('netease')">
@@ -335,13 +338,19 @@
                                                         t('lxMusic') }}
                                                 </div>
                                                 <div class="dropdown-item"
+                                                    :class="{ 'is-active': targetPlayer === 'browserPro' }"
+                                                    @click="handleSelectPlayer('browserPro')">
+                                                    <img src="../assets/edge-logo.png" class="platform-icon">
+                                                    {{ t('browserPro') }}
+                                                </div>
+                                                <div class="dropdown-item"
                                                     :class="{ 'is-active': targetPlayer === 'other' }"
                                                     @click="handleSelectPlayer('other')">
                                                     <svg viewBox="0 0 24 24" class="platform-icon" fill="currentColor">
                                                         <path
                                                             d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z" />
                                                     </svg>
-                                                    {{ t('otherMediaControl') }}
+                                                    {{ t('genericMedia') }}
                                                 </div>
                                             </div>
                                         </transition>
@@ -533,7 +542,7 @@
                     <div class="modal-footer">
                         <button v-if="dialog.isConfirm" class="btn btn-secondary" @click="closeDialog">{{ t('cancel')
                             }}</button>
-                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ t('confirm') }}</button>
+                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ dialog.confirmText || t('confirm') }}</button>
                     </div>
                 </div>
             </div>
@@ -905,6 +914,17 @@ const isPlayerDropdownOpen = ref(false);
 const handleSelectPlayer = (player: string) => {
     setTargetPlayer(player);
     isPlayerDropdownOpen.value = false;
+
+    // 浏览器Pro模式：首次选择时弹出说明弹窗
+    if (player === 'browserPro') {
+        showDialog(
+            t('browserPro'),
+            t('browserProDesc'),
+            false,
+            null,
+            t('gotIt')
+        );
+    }
 };
 
 // 数据统计图表类型控制状态与方法
@@ -1164,11 +1184,12 @@ const dialog = ref({
     title: 'NetSpeed Dynamic',
     message: '',
     isConfirm: false,
+    confirmText: '', // 确定按钮文字，为空时用默认 t('confirm')
     callback: null as (() => void) | null
 });
 
-const showDialog = (title: string, message: string, isConfirm = false, onConfirm: (() => void) | null = null) => {
-    dialog.value = { visible: true, title, message, isConfirm, callback: onConfirm };
+const showDialog = (title: string, message: string, isConfirm = false, onConfirm: (() => void) | null = null, confirmText = '') => {
+    dialog.value = { visible: true, title, message, isConfirm, confirmText, callback: onConfirm };
 };
 
 // 处理插件缺失的弹窗逻辑
@@ -2553,8 +2574,8 @@ input:disabled+.slider {
     border: 1px solid var(--select-border);
     border-radius: 8px;
     cursor: pointer;
-    width: 105px;
-    /* 固定紧凑宽度 */
+    width: 120px;
+    /* 固定紧凑宽度，右缘对齐容器，加宽时向左延伸 */
     box-sizing: border-box;
     transition: all 0.2s ease;
 }
@@ -2614,6 +2635,12 @@ input:disabled+.slider {
     gap: 2px;
     max-height: 140px;
     overflow-y: auto;
+}
+
+/* 播放器菜单有 9 项，全高展开会超出窗口底部被裁剪（末项只能点到上半部分），
+   故限制得更矮，保证菜单整体落在窗口可视区内；内容可滚动查看 */
+.dropdown-menu.player-menu {
+    max-height: 112px;
 }
 
 /* 隐藏原生粗糙的滚动条，替换为你主题风格的细线条 */

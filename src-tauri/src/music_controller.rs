@@ -87,6 +87,10 @@ fn get_target_media_session() -> Option<(GlobalSystemMediaTransportControlsSessi
             {
                 return Some((session, app_id_str));
             }
+            // 浏览器Pro：基于通用媒体模式，识别所有媒体（不限定 Edge/Chrome）
+            else if target == "browserPro" {
+                return Some((session, app_id_str));
+            }
             // 其他平台：按包名包含目标平台名匹配
             else if target != "netease" && app_id_str.contains(&target) {
                 return Some((session, app_id_str));
@@ -525,7 +529,22 @@ async fn search_song_meta(
     }
     let clean_artist = {
         let a = artist_name.trim().to_lowercase();
-        if a.is_empty() || a == "edge" || a == "chrome" || a == "potplayer" || a == "bilibili" {
+        // 占位歌手（edge/chrome/potplayer/bilibili）与平台名（如"网易云音乐"）都视为无歌手：
+        // 平台名作为歌手会污染搜索词（如搜"歌名 网易云音乐"），歌手交给搜索结果的真实字段兜底
+        let is_placeholder = a.is_empty()
+            || a == "edge"
+            || a == "chrome"
+            || a == "potplayer"
+            || a == "bilibili"
+            || [
+                "网易云", "云音乐", "qq音乐", "qqmusic", "酷狗", "kugou", "酷我", "kuwo",
+                "虾米", "咪咕", "汽水音乐", "5sing", "spotify", "apple music", "itunes",
+                "youtube music", "soundcloud", "bandcamp", "tidal", "deezer", "pandora",
+                "amazon music", "音乐", "music",
+            ]
+            .iter()
+            .any(|p| a.contains(*p));
+        if is_placeholder {
             String::new()
         } else {
             artist_name.trim().to_string()
