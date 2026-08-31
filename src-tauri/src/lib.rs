@@ -551,11 +551,16 @@ fn get_clipboard_text() -> Result<String, String> {
 #[tauri::command]
 async fn get_active_browser_tabs() -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
+
+        // CREATE_NO_WINDOW：隐藏 PowerShell 子进程的控制台窗口（打包后不带窗口启动时会弹窗）
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Process | Where-Object { $_.MainWindowTitle -and ($_.ProcessName -match 'msedge|chrome') } | ForEach-Object { Write-Host $_.MainWindowTitle }"#;
 
         let output = Command::new("powershell")
+            .creation_flags(CREATE_NO_WINDOW)
             .arg("-NoProfile")
             .arg("-Command")
             .arg(script)
