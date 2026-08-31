@@ -790,7 +790,8 @@ const judgeBrowserMode = async (): Promise<'music' | 'video'> => {
             const MusicKeywords = ['music', 'Music', '音乐', 'spotify', 'Spotify'];
             const isVideo = VideoKeywords.some(keyword => tabs.includes(keyword));
             const isMusic = MusicKeywords.some(keyword => tabs.includes(keyword));
-            isBrowserMusic.value = !isVideo || isMusic; // 封面/标题策略沿用此信号
+            isBrowserMusic.value = (!isVideo || isMusic) && isMusic !== isVideo; // 非视频站且有音乐关键词，或 音乐关键词且非视频站
+            console.log(isBrowserMusic.value);
             browserContentOverride.value = isBrowserMusic.value ? 'music' : 'video';
         } catch {
             browserContentOverride.value = null; // 标签页读取失败 → 不做额外判定，走歌词兜底
