@@ -544,44 +544,74 @@ fn get_clipboard_text() -> Result<String, String> {
 }
 
 /// 获取浏览器实时活动标签页（当前窗口标题，即活动标签标题）
-/// Windows 上通过 PowerShell 枚举 msedge/chrome 进程的主窗口标题实现。
+/// Windows 上通过 Win32 API（EnumWindows）枚举 msedge/chrome 进程的可见顶层窗口标题实现，
+/// 替代原来的 PowerShell 轮询方案：不再每 2s 冷启动一个 PowerShell 子进程，开销更低、响应更快，
+/// 且 GetWindowTextW 直接返回 UTF-16，中文标题天然正确，无需再处理控制台编码。
 /// 注意：必须 async + spawn_blocking 放到阻塞线程池执行——Tauri v2 里不带 async 的同步命令
-/// 会直接跑在主线程，而 PowerShell 冷启动要几百毫秒，每 2s 轮询一次就会周期性卡死 UI（频谱/动画掉帧）。
+/// 会直接跑在主线程，阻塞 UI（频谱/动画掉帧）。
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn get_active_browser_tabs() -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
+        use winapi::shared::minwindef::{BOOL, FALSE, LPARAM, TRUE};
+        use winapi::shared::windef::HWND;
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winbase::QueryFullProcessImageNameW;
+        use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+        use winapi::um::winuser::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible};
 
-        // CREATE_NO_WINDOW：隐藏 PowerShell 子进程的控制台窗口（打包后不带窗口启动时会弹窗）
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let script = r#"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Process | Where-Object { $_.MainWindowTitle -and ($_.ProcessName -match 'msedge|chrome') } | ForEach-Object { Write-Host $_.MainWindowTitle }"#;
-
-        let output = Command::new("powershell")
-            .creation_flags(CREATE_NO_WINDOW)
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(script)
-            .output()
-            .map_err(|e| format!("执行 PowerShell 失败: {}", e))?;
-
-        if !output.status.success() {
-            return Err(format!(
-                "PowerShell 执行失败: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        // EnumWindows 回调：lParam 携带结果 Vec 的指针，收集所有可见的 msedge/chrome 窗口标题
+        unsafe extern "system" fn enum_browser_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let titles = lparam as *mut Vec<String>;
+            // 与旧 PowerShell 的 MainWindowTitle 语义一致：只处理可见窗口
+            if IsWindowVisible(hwnd) == FALSE {
+                return TRUE;
+            }
+            // 通过窗口所属进程判断是否为 msedge/chrome（与旧 PowerShell 按进程名匹配一致）
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 {
+                return TRUE;
+            }
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if process.is_null() {
+                return TRUE; // 权限不足（如浏览器以管理员运行）时跳过，与 PowerShell 读不到标题时行为一致
+            }
+            let mut path_buf = [0u16; 1024];
+            let mut path_len = path_buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, 0, path_buf.as_mut_ptr(), &mut path_len);
+            CloseHandle(process);
+            if ok == FALSE {
+                return TRUE;
+            }
+            let path = String::from_utf16_lossy(&path_buf[..path_len as usize]).to_lowercase();
+            let is_browser = path.ends_with("msedge.exe") || path.ends_with("chrome.exe");
+            if !is_browser {
+                return TRUE;
+            }
+            // 读取窗口标题（UTF-16，天然支持中文，无需编码转换）
+            let mut title_buf = [0u16; 512];
+            let n = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
+            if n > 0 {
+                let title = String::from_utf16_lossy(&title_buf[..n as usize]);
+                let title = title.trim().to_string();
+                if !title.is_empty() {
+                    (*titles).push(title);
+                }
+            }
+            TRUE
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let tabs: Vec<String> = stdout
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
+        let mut titles: Vec<String> = Vec::new();
+        unsafe {
+            EnumWindows(Some(enum_browser_windows), &mut titles as *mut Vec<String> as isize);
+        }
+        // 去重：同一标题可能来自多个窗口/进程，保持首次出现顺序
+        let mut seen = std::collections::HashSet::new();
+        titles.retain(|t| seen.insert(t.clone()));
 
-        Ok(tabs)
+        Ok(titles)
     })
     .await
     .map_err(|e| format!("获取浏览器标签页任务失败: {}", e))?
