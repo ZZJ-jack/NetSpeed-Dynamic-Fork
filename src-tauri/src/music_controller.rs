@@ -3,6 +3,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{command, AppHandle, Emitter};
 use tokio_tungstenite::connect_async;
+use std::sync::OnceLock;
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn get_http_client() -> reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(4))
+            .build()
+            .unwrap_or_default()
+    }).clone()
+}
 
 // --- 引入 SMTC 需要的模块 ---
 use windows::Media::Control::{
@@ -305,10 +317,7 @@ pub async fn get_random_cover_url(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = get_http_client();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(3);
 
@@ -508,10 +517,7 @@ async fn search_song_meta(
     artist_name: &str,
     duration_ms: i64,
 ) -> Option<(String, String, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(4))
-        .build()
-        .ok()?;
+    let client = get_http_client();
 
     let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 

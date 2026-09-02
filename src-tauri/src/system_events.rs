@@ -29,7 +29,7 @@ pub fn start_monitor(app: AppHandle) {
         }
 
         // 初始化 System 监控
-        let mut sys = System::new_all();
+        let mut sys = System::new();
         sys.refresh_cpu_usage(); // 必须先刷新一次，否则第一次读取全是 0
 
         let mut last_volume = get_system_volume().unwrap_or(-1.0);

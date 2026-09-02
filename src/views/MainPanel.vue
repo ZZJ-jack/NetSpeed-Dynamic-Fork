@@ -104,7 +104,7 @@
                                     <template v-if="themeMode === 'light'">{{ t('lightMode') }}</template>
                                     <template v-else-if="themeMode === 'dark'">{{ t('darkMode') }}</template>
                                     <template v-else-if="themeMode === 'coverglass'">{{ t('coverglassMode')
-                                        }}</template>
+                                    }}</template>
                                     <template v-else-if="themeMode === 'system'">{{ t('systemMode') }}</template>
                                 </div>
                                 <svg viewBox="0 0 24 24" class="arrow-icon"
@@ -226,8 +226,8 @@
                                             @click="isLanguageDropdownOpen = !isLanguageDropdownOpen">
                                             <div class="current-item">
                                                 {{t(languageOptions.find(opt => opt.value ===
-                                                currentLanguage)?.labelKey ||
-                                                'simplifiedChinese') }}
+                                                    currentLanguage)?.labelKey ||
+                                                    'simplifiedChinese')}}
                                             </div>
                                             <svg viewBox="0 0 24 24" class="arrow-icon"
                                                 :class="{ 'is-open': isLanguageDropdownOpen }">
@@ -541,8 +541,10 @@
                     </div>
                     <div class="modal-footer">
                         <button v-if="dialog.isConfirm" class="btn btn-secondary" @click="closeDialog">{{ t('cancel')
+                        }}</button>
+                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ dialog.confirmText ||
+                            t('confirm')
                             }}</button>
-                        <button class="btn btn-primary" @click="handleDialogConfirm">{{ dialog.confirmText || t('confirm') }}</button>
                     </div>
                 </div>
             </div>
@@ -1623,8 +1625,14 @@ onMounted(async () => {
 
 onUnmounted(() => {
     clearInterval(speedTimer);
-    chartInstance?.dispose();
-    statsChartInstance?.dispose();
+    if (chartInstance) {
+        chartInstance.dispose();
+        chartInstance = null;
+    }
+    if (statsChartInstance) {
+        statsChartInstance.dispose();
+        statsChartInstance = null;
+    }
     systemThemeMedia?.removeEventListener('change', handleSystemThemeUpdate);
     localStorage.setItem('nsd_traffic_stats', JSON.stringify(trafficData.value));
     if (coverTimer) clearInterval(coverTimer);
