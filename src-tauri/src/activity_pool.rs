@@ -1,0 +1,411 @@
+// 活动池模块：外部服务通过 47300 端口的 HTTP API 创建/更新/删除"活动"，
+// Rust 侧维护活动池状态，并以 30Hz 节流将快照定向推送给 widget 灵动岛窗口。
+//
+// HTTP API（均绑定 127.0.0.1:47300）：
+//   POST   /api/activities               创建或整体更新一个活动（幂等 upsert）
+//   PATCH  /api/activities/{id}          部分更新（字段缺失=不改，null/空串=清除）
+//   DELETE /api/activities/{id}          删除单个活动
+//   DELETE /api/activities               清空活动池
+//   GET    /api/activities               获取当前快照（调试用）
+//
+// 事件推送（30Hz 节流，定向 emit 到 "widget" 窗口）：
+//   event: "activity-pool"
+//   payload: { "ts": ..., "activities": [Activity...] } 按 (priority, updated) 排序
+
+use axum::extract::State as AxState;
+use axum::routing::{patch, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
+
+/// 活动池 HTTP 服务端口
+const ACTIVITY_HTTP_PORT: u16 = 47300;
+/// 前端窗口 label
+const WIDGET_LABEL: &str = "widget";
+/// 节流推送间隔（30Hz）
+const TICK_INTERVAL: Duration = Duration::from_millis(33);
+
+// ---------- 内部数据模型 ----------
+
+/// 池内活动（含内部时间戳，不直接外发）
+#[derive(Debug, Clone)]
+struct Activity {
+    id: String,
+    title: String,
+    subtitle: String,
+    kind: String,
+    icon: String,
+    color: String,
+    /// Some(v)=确定进度 0-100；None=不确定进度(indeterminate)
+    progress: Option<u8>,
+    /// 越大越优先展示（同优先级按更新时间倒序）
+    priority: i32,
+    created_ms: u64,
+    updated_ms: u64,
+    /// Some = 绝对过期时间戳(ms)，到期自动从池中移除
+    expires_at: Option<u64>,
+    /// 任意扩展字段，前端可自由消费
+    extra: Option<serde_json::Value>,
+}
+
+impl Activity {
+    fn new(id: String) -> Self {
+        let now = now_ms();
+        Self {
+            id,
+            title: String::new(),
+            subtitle: String::new(),
+            kind: String::new(),
+            icon: String::new(),
+            color: String::new(),
+            progress: None,
+            priority: 0,
+            created_ms: now,
+            updated_ms: now,
+            expires_at: None,
+            extra: None,
+        }
+    }
+
+    /// 是否没有任何可展示内容（池里留着它没有意义）
+    fn is_blank(&self) -> bool {
+        self.title.is_empty()
+            && self.subtitle.is_empty()
+            && self.kind.is_empty()
+            && self.icon.is_empty()
+            && self.color.is_empty()
+            && self.progress.is_none()
+            && self.extra.is_none()
+    }
+}
+
+/// 外发给前端的一条活动
+#[derive(Debug, Clone, Serialize)]
+struct ActivityOut {
+    id: String,
+    title: String,
+    subtitle: String,
+    kind: String,
+    /// 空串 = 无图标（前端用 kind 兜底）
+    icon: String,
+    color: String,
+    progress: Option<u8>,
+    priority: i32,
+    /// 剩余存活毫秒；null = 永不过期
+    remaining_ms: Option<u64>,
+    extra: Option<serde_json::Value>,
+}
+
+impl From<&Activity> for ActivityOut {
+    fn from(a: &Activity) -> Self {
+        let remaining_ms = a.expires_at.map(|e| e.saturating_sub(now_ms()));
+        Self {
+            id: a.id.clone(),
+            title: a.title.clone(),
+            subtitle: a.subtitle.clone(),
+            kind: a.kind.clone(),
+            icon: a.icon.clone(),
+            color: a.color.clone(),
+            progress: a.progress,
+            priority: a.priority,
+            remaining_ms,
+            extra: a.extra.clone(),
+        }
+    }
+}
+
+// ---------- HTTP 请求体 ----------
+
+/// POST 创建/整体更新
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UpsertActivityReq {
+    id: String,
+    title: Option<String>,
+    subtitle: Option<String>,
+    kind: Option<String>,
+    icon: Option<String>,
+    color: Option<String>,
+    progress: Option<u8>,
+    priority: Option<i32>,
+    /// 相对存活时长；已有活动不传则不重置过期
+    ttl_ms: Option<u64>,
+    extra: Option<serde_json::Value>,
+}
+
+/// PATCH 部分更新：外层 Option = 本次是否修改；内层值 = 具体值
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PatchActivityReq {
+    title: Option<Option<String>>,
+    subtitle: Option<Option<String>>,
+    kind: Option<Option<String>>,
+    icon: Option<Option<String>>,
+    color: Option<Option<String>>,
+    progress: Option<Option<u8>>,
+    priority: Option<i32>,
+    ttl_ms: Option<u64>,
+    extra: Option<Option<serde_json::Value>>,
+}
+
+// ---------- 活动池 ----------
+
+struct PoolInner {
+    items: HashMap<String, Activity>,
+    /// 有改动待推送（节流后合并推送）
+    dirty: bool,
+}
+
+#[derive(Clone)]
+struct ServerState {
+    pool: Arc<Mutex<PoolInner>>,
+    app: AppHandle,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn clamp_progress(v: u8) -> u8 {
+    v.min(100)
+}
+
+/// 快照：清理过期 + 排序 + 转外发结构（调用方需持有锁）
+fn build_snapshot(inner: &PoolInner) -> Vec<ActivityOut> {
+    let now = now_ms();
+    let mut list: Vec<&Activity> = inner
+        .items
+        .values()
+        // 过滤过期项与无展示内容的项
+        .filter(|a| a.expires_at.map_or(true, |e| e > now))
+        .filter(|a| !a.is_blank())
+        .collect();
+    // 优先级降序，其次更新时间降序（越新越靠前）
+    list.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| b.updated_ms.cmp(&a.updated_ms))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    list.into_iter().map(ActivityOut::from).collect()
+}
+
+/// 从池中移除已过期活动，返回是否有移除
+fn purge_expired(inner: &mut PoolInner) -> bool {
+    let now = now_ms();
+    let before = inner.items.len();
+    inner.items.retain(|_, a| a.expires_at.map_or(true, |e| e > now));
+    inner.items.len() != before
+}
+
+// ---------- HTTP handlers ----------
+
+async fn upsert_activity(
+    AxState(state): AxState<ServerState>,
+    Json(req): Json<UpsertActivityReq>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if req.id.trim().is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "id 不能为空".into(),
+        ));
+    }
+
+    let mut inner = state.pool.lock().await;
+    let now = now_ms();
+
+    let entry = inner.items.entry(req.id.clone()).or_insert_with(|| {
+        let mut a = Activity::new(req.id.clone());
+        a.created_ms = now;
+        a
+    });
+
+    // 覆盖式更新：仅对 Some 字段生效（POST 幂等，不隐式清空）
+    if let Some(v) = req.title {
+        entry.title = v;
+    }
+    if let Some(v) = req.subtitle {
+        entry.subtitle = v;
+    }
+    if let Some(v) = req.kind {
+        entry.kind = v;
+    }
+    if let Some(v) = req.icon {
+        entry.icon = v;
+    }
+    if let Some(v) = req.color {
+        entry.color = v;
+    }
+    if let Some(v) = req.progress {
+        entry.progress = Some(clamp_progress(v));
+    }
+    if let Some(v) = req.priority {
+        entry.priority = v;
+    }
+    // ttl：显式传入才重算过期
+    if let Some(ttl) = req.ttl_ms {
+        entry.expires_at = Some(now.saturating_add(ttl));
+    }
+    if let Some(v) = req.extra {
+        entry.extra = Some(v);
+    }
+    entry.updated_ms = now;
+
+    inner.dirty = true;
+    drop(inner);
+
+    Ok(Json(serde_json::json!({ "ok": true, "id": req.id })))
+}
+
+async fn patch_activity(
+    AxState(state): AxState<ServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<PatchActivityReq>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let mut inner = state.pool.lock().await;
+
+    let entry = match inner.items.get_mut(&id) {
+        Some(e) => e,
+        None => {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                format!("活动 {} 不存在", id),
+            ))
+        }
+    };
+
+    let now = now_ms();
+    // 文本/图标/颜色/kind：Some(Some(s)) 覆盖；Some(None) 清除
+    let apply_opt = |cur: &mut String, v: &Option<Option<String>>| {
+        if let Some(inner_v) = v {
+            *cur = inner_v.clone().unwrap_or_default();
+        }
+    };
+    apply_opt(&mut entry.title, &req.title);
+    apply_opt(&mut entry.subtitle, &req.subtitle);
+    apply_opt(&mut entry.kind, &req.kind);
+    apply_opt(&mut entry.icon, &req.icon);
+    apply_opt(&mut entry.color, &req.color);
+
+    // progress：Some(Some(v)) 覆盖；Some(None) 转为不确定进度
+    if let Some(p) = req.progress {
+        entry.progress = p.map(clamp_progress);
+    }
+    if let Some(p) = req.priority {
+        entry.priority = p;
+    }
+    if let Some(ttl) = req.ttl_ms {
+        entry.expires_at = Some(now.saturating_add(ttl));
+    }
+    // extra：Some(Some(v)) 覆盖；Some(None) 清除
+    if let Some(v) = req.extra {
+        entry.extra = v;
+    }
+
+    entry.updated_ms = now;
+    inner.dirty = true;
+    drop(inner);
+
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+async fn delete_activity(
+    AxState(state): AxState<ServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let mut inner = state.pool.lock().await;
+    let existed = inner.items.remove(&id).is_some();
+    if existed {
+        inner.dirty = true;
+    }
+    drop(inner);
+    Json(serde_json::json!({ "ok": existed, "id": id }))
+}
+
+async fn clear_activities(AxState(state): AxState<ServerState>) -> Json<serde_json::Value> {
+    let mut inner = state.pool.lock().await;
+    let had = !inner.items.is_empty();
+    inner.items.clear();
+    if had {
+        inner.dirty = true;
+    }
+    drop(inner);
+    Json(serde_json::json!({ "ok": true, "count": 0 }))
+}
+
+async fn list_activities(AxState(state): AxState<ServerState>) -> Json<serde_json::Value> {
+    let inner = state.pool.lock().await;
+    let snap = build_snapshot(&inner);
+    drop(inner);
+    Json(serde_json::json!({ "activities": snap, "ts": now_ms() }))
+}
+
+// ---------- 启动 ----------
+
+/// 在 Tauri 运行时内启动：1) 47300 HTTP 服务；2) 30Hz 节流推送任务
+pub fn start(app: AppHandle) {
+    let state = ServerState {
+        pool: Arc::new(Mutex::new(PoolInner {
+            items: HashMap::new(),
+            dirty: false,
+        })),
+        app: app.clone(),
+    };
+
+    // HTTP 服务
+    let router = Router::new()
+        .route(
+            "/api/activities",
+            post(upsert_activity)
+                .get(list_activities)
+                .delete(clear_activities),
+        )
+        .route(
+            "/api/activities/{id}",
+            patch(patch_activity).delete(delete_activity),
+        )
+        .with_state(state.clone());
+
+    tauri::async_runtime::spawn(async move {
+        let addr = format!("127.0.0.1:{}", ACTIVITY_HTTP_PORT);
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                eprintln!("[activity-pool] HTTP 服务已启动: http://{}", addr);
+                let _ = axum::serve(listener, router).await;
+            }
+            Err(e) => {
+                eprintln!("[activity-pool] 绑定 {} 失败: {}", addr, e);
+            }
+        }
+    });
+
+    // 30Hz 节流推送（Tauri 事件本身是高层的 JSON IPC，瓶颈在推送频率，
+    // 用固定打点把 33ms 内的 N 次改动合并成 1 次快照推送）
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(TICK_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let mut inner = state.pool.lock().await;
+            // 顺带清理过期活动（可能产生脏标记）
+            let purged = purge_expired(&mut inner);
+            if !inner.dirty && !purged {
+                continue;
+            }
+            inner.dirty = false;
+            let snapshot = build_snapshot(&inner);
+            drop(inner);
+
+            let payload = serde_json::json!({
+                "ts": now_ms(),
+                "activities": snapshot,
+            });
+            let _ = state.app.emit_to(WIDGET_LABEL, "activity-pool", payload);
+        }
+    });
+}

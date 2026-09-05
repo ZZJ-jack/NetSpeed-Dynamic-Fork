@@ -17,7 +17,36 @@
 
                 <div class="inner-wrapper">
                     <transition mode="out-in" @enter="onInnerEnter" @leave="onInnerLeave" :css="false">
-                        <div v-if="isMsgActive" class="msg-box" key="msg">
+                        <div v-if="displayActivity && topActivity" class="activity-box" key="activity"
+                            :style="topActivity.color ? { '--activity-accent': topActivity.color } : {}">
+                            <div class="activity-avatar">
+                                <img v-if="topActivity.icon" :src="topActivity.icon" alt="活动图标"
+                                    class="activity-avatar-img">
+                                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" class="activity-fallback-icon">
+                                    <path d="M22 12h-4l-3 9L9 3l-3 9H2" stroke-width="2" stroke-linecap="round"
+                                        stroke-linejoin="round" />
+                                </svg>
+                            </div>
+                            <div class="activity-text-wrapper">
+                                <div class="activity-title">
+                                    <span class="activity-name">{{ topActivity.title || '任务进行中' }}</span>
+                                    <span v-if="topActivity.kind" class="activity-kind">{{ topActivity.kind }}</span>
+                                </div>
+                                <div class="activity-subtitle" v-if="topActivity.subtitle">{{ topActivity.subtitle }}</div>
+                                <div class="activity-progress-row">
+                                    <div class="activity-progress-track">
+                                        <div class="activity-progress-fill"
+                                            :class="{ 'is-indeterminate': topActivity.progress == null }"
+                                            :style="topActivity.progress != null ? { width: topActivity.progress + '%' } : {}">
+                                        </div>
+                                    </div>
+                                    <span v-if="topActivity.progress != null" class="activity-progress-text">{{
+                                        topActivity.progress }}%</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-else-if="isMsgActive" class="msg-box" key="msg">
                             <div class="msg-avatar">
                                 <img :src="currentMsgIcon" alt="消息图标" class="msg-avatar-img">
                             </div>
@@ -559,6 +588,62 @@ const msgAppName = ref('');
 const msgBody = ref('');
 const msgAumid = ref('');
 
+// ==================== 活动池（外部服务经 47300 HTTP 推送，Rust 30Hz 节流快照） ====================
+interface ActivityData {
+    id: string;
+    title: string;
+    subtitle: string;
+    kind: string;
+    icon: string;
+    color: string;
+    progress: number | null;
+    priority: number;
+    remaining_ms: number | null;
+    extra: unknown;
+}
+
+// 快照已按 (priority, updated) 排好序，第一个即当前应展示的活动
+const activityPool = ref<ActivityData[]>([]);
+const topActivity = computed<ActivityData | null>(() => activityPool.value.length > 0 ? activityPool.value[0] : null);
+const displayActivity = computed(() => !!topActivity.value);
+
+let stopActivityPoolListener: (() => void) | null = null;
+const startActivityPoolListening = async () => {
+    if (stopActivityPoolListener) return;
+    stopActivityPoolListener = await listen<{ ts: number, activities: ActivityData[] }>('activity-pool', (event) => {
+        // 只替换一次引用：同 id 活动仅字段变化时不会触发 displayActivity 翻转
+        activityPool.value = Array.isArray(event.payload?.activities) ? event.payload.activities : [];
+    });
+};
+const stopActivityPoolListening = () => {
+    if (stopActivityPoolListener) {
+        stopActivityPoolListener();
+        stopActivityPoolListener = null;
+    }
+};
+
+// 活动出现 → 立即接管岛体（顶掉消息 / 音乐展开态）；
+// 活动结束 → 显式收起回当前基础内容尺寸（displayXxx 不感知活动，无法靠内容切换 watch 触发）
+watch(displayActivity, (showing) => {
+    if (!showing) {
+        const { w, h } = getBaseSize();
+        animateIslandSize(w, h);
+        return;
+    }
+    isMsgActive.value = false;
+    if ((window as any).msgTimer) {
+        clearTimeout((window as any).msgTimer);
+        (window as any).msgTimer = null;
+    }
+    isMusicExpanded.value = false;
+    isMusicExpanding.value = false;
+    if (musicExpandAnimTimer) {
+        clearTimeout(musicExpandAnimTimer);
+        musicExpandAnimTimer = null;
+    }
+    animateIslandSize(Math.max(nsdMsgExpandedWidth.value, 320), 70);
+});
+
 // 跟踪底层是否有真实的媒体活动
 const isMediaActive = ref(true); // 默认 true，交给首次轮询决定去留
 let isFirstMediaCheck = true;    // 标记首次检查，防止开机启动时乱弹窗
@@ -577,7 +662,7 @@ const processToastQueue = async () => {
     if (isProcessingToast || toastQueue.value.length === 0) return;
 
     // 优先级判断：如果当前正在显示消息通知(最高优先级)，则挂起等待
-    if (isMsgActive.value) return;
+    if (isMsgActive.value || displayActivity.value) return;
 
     isProcessingToast = true;
     const nextToast = toastQueue.value.shift();
@@ -607,7 +692,7 @@ watch(displaySysToast, (newVal) => {
     } else {
         // 通知消失时，恢复到当前状态该有的尺寸
         // （前提是没有被应用消息或音乐面板占用）
-        if (!isMsgActive.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+        if (!isMsgActive.value && !displayActivity.value && !isMusicExpanded.value && !isMusicExpanding.value) {
             const { w, h } = getBaseSize();
             animateIslandSize(w, h);
         }
@@ -666,14 +751,14 @@ const pollClipboard = async () => {
         clipboardLink.value = link;
         displayClipboard.value = true;
         // 若消息通知此刻正在占用，等它消失后再让出尺寸（见下方 watch）
-        if (!isMsgActive.value) {
+        if (!isMsgActive.value && !displayActivity.value) {
             animateIslandSize(Math.max(nsdMsgExpandedWidth.value, 320), 70);
         }
 
         if (clipboardHideTimer) clearTimeout(clipboardHideTimer);
         clipboardHideTimer = setTimeout(() => {
             displayClipboard.value = false;
-            if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+            if (!isMsgActive.value && !displayActivity.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
                 const { w, h } = getBaseSize();
                 animateIslandSize(w, h);
             }
@@ -714,7 +799,7 @@ const stopClipboardPolling = () => {
     // 关闭开关时同步收起正在显示的剪贴板卡片
     if (displayClipboard.value) {
         displayClipboard.value = false;
-        if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+        if (!isMsgActive.value && !displayActivity.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
             const { w, h } = getBaseSize();
             animateIslandSize(w, h);
         }
@@ -746,7 +831,7 @@ const nsdLyricDelay = ref(Number(localStorage.getItem('nsd_lyric_delay')) || 0);
 const WS_LYRIC_DELAY_MS = 500;
 
 // 1. 判定当前是否处于大窗口状态
-const isExpandedSize = computed(() => isMusicExpanded.value || isMsgActive.value);
+const isExpandedSize = computed(() => isMusicExpanded.value || isMsgActive.value || displayActivity.value);
 
 // 2. 外层容器：状态一变，立马切成目标圆角
 const islandStyle = computed<CSSProperties>(() => {
@@ -1609,7 +1694,7 @@ const displayMusic = computed(() => !isMsgActive.value && !displaySysToast.value
 
 // 智能判断静默模式下是否该显示：有消息、有系统提示、剪贴板链接通知，或开启了音乐控制且正在播放
 const shouldShowInQuietMode = computed(() =>
-    isMsgActive.value || displaySysToast.value || displayClipboard.value || (isMusicCtlEnabled.value && isMediaActive.value)
+    isMsgActive.value || displayActivity.value || displaySysToast.value || displayClipboard.value || (isMusicCtlEnabled.value && isMediaActive.value)
 );
 watch(shouldShowInQuietMode, async (newVal) => {
     if (isMsgModeEnabled.value) {
@@ -1629,7 +1714,7 @@ watch(shouldShowInQuietMode, async (newVal) => {
 });
 
 // 沉浸背景的独立存活逻辑
-// 只要媒体活跃且未被消息弹窗占用，背景就一直存在，即使正在显示系统通知
+// 只要媒体活跃且未被消息弹窗/活动池占用，背景就一直存在，即使正在显示系统通知
 // 前景封面是软件/平台 logo（非真实专辑封面）时全局禁用：logo 用于模糊背景无意义，
 // 也可避免残留的旧模糊封面在切到 logo 封面后继续渲染
 const showCoverglassBg = computed(() => {
@@ -1637,6 +1722,7 @@ const showCoverglassBg = computed(() => {
         isMusicCtlEnabled.value &&
         isMediaActive.value &&
         !isMsgActive.value &&
+        !displayActivity.value &&
         blurredCoverUrl.value &&
         !APP_COVER_LOGOS.includes(coverUrl.value);
 });
@@ -1651,8 +1737,8 @@ const getBaseSize = () => {
 
 // 监听内容切换，触发丝滑动画过渡
 watch([displaySpeed, displayMusic, displayResource, displayFps], () => {
-    // 仅在未被临时弹窗（消息、音乐展开）占用时，才执行基础大小切换
-    if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+    // 仅在未被临时弹窗（消息、活动、音乐展开）占用时，才执行基础大小切换
+    if (!isMsgActive.value && !displayActivity.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
         const { w, h } = getBaseSize();
         animateIslandSize(w, h);
     }
@@ -2736,7 +2822,7 @@ const collapseMusic = () => {
 
     // 消息通知正在显示时，只复位媒体展开状态，不收缩岛体尺寸，
     // 否则会把正在展示的消息压回折叠尺寸（消息应保持消息展开宽度）
-    if (isMsgActive.value) return;
+    if (isMsgActive.value || displayActivity.value) return;
 
     const { w, h } = getBaseSize();
     animateIslandSize(w, h);
@@ -2844,6 +2930,9 @@ onMounted(async () => {
         startClipboardPolling();
     }
 
+    // 启动活动池事件监听（30Hz 快照推送）
+    startActivityPoolListening();
+
     window.addEventListener('blur', collapseMusic);
 
     document.addEventListener('contextmenu', (e) => {
@@ -2858,7 +2947,7 @@ onMounted(async () => {
         // 检查自定义槽位中是否有 fps，如果有则自动唤醒采集
         checkAndToggleFpsPlugin();
 
-        if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+        if (!isMsgActive.value && !displayActivity.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
             const { w, h } = getBaseSize();
             animateIslandSize(w, h);
         }
@@ -2909,6 +2998,8 @@ onMounted(async () => {
                 animateIslandSize(nsdMusicExpandedWidth.value, 135);
             } else if (isMsgActive.value) {
                 animateIslandSize(nsdMsgExpandedWidth.value, 65);
+            } else if (displayActivity.value) {
+                animateIslandSize(Math.max(nsdMsgExpandedWidth.value, 320), 70);
             } else {
                 const { w, h } = getBaseSize();
                 animateIslandSize(w, h);
@@ -2916,7 +3007,7 @@ onMounted(async () => {
         }
 
         // 收到设置修改后，如果此时没有展开音乐或显示通知，则立即触发形变更新外观！
-        if (!isMsgActive.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
+        if (!isMsgActive.value && !displayActivity.value && !displaySysToast.value && !isMusicExpanded.value && !isMusicExpanding.value) {
             const { w, h } = getBaseSize();
             animateIslandSize(w, h);
         }
@@ -3124,7 +3215,9 @@ onMounted(async () => {
             try {
                 // 智能判断当前该发什么模式
                 let currentMode = 'speed';
-                if (isMsgActive.value) {
+                if (displayActivity.value) {
+                    currentMode = 'message'; // 活动池复用消息通道，正文用活动内容
+                } else if (isMsgActive.value) {
                     currentMode = 'message';
                 } else if (displayMusic.value) {
                     currentMode = 'music';
@@ -3139,8 +3232,12 @@ onMounted(async () => {
                     mode: currentMode,
                     isPlaying: isPlaying.value,
                     cover: coverUrl.value || "",
-                    msgTitle: msgTitle.value || msgAppName.value || "新通知",
-                    msgBody: msgBody.value || "",
+                    msgTitle: displayActivity.value
+                        ? (topActivity.value?.title || "任务进行中")
+                        : (msgTitle.value || msgAppName.value || "新通知"),
+                    msgBody: displayActivity.value
+                        ? (topActivity.value?.subtitle || "")
+                        : (msgBody.value || ""),
                     msgIcon: currentMsgIcon.value || "",
                     cpu: Math.round(cpuUsage.value),
                     ram: Math.round(ramUsage.value)
@@ -3226,7 +3323,8 @@ onMounted(async () => {
 
                 currentMsgIcon.value = getAppIcon(res.app_name);
 
-                if (!isMsgActive.value) {
+                // 活动池占用时让路给活动（下轮轮询再尝试接管）
+                if (!isMsgActive.value && !displayActivity.value) {
                     isMsgActive.value = true;
                     // 消息接管时复位媒体展开状态：避免消息消失后音乐盒以展开态显示在折叠尺寸上
                     isMusicExpanded.value = false;
@@ -3237,14 +3335,15 @@ onMounted(async () => {
                         musicExpandAnimTimer = null;
                     }
                     animateIslandSize(nsdMsgExpandedWidth.value, 65);
-                }
 
-                if ((window as any).msgTimer) clearTimeout((window as any).msgTimer);
-                (window as any).msgTimer = setTimeout(() => {
-                    isMsgActive.value = false;
-                    const { w, h } = getBaseSize();
-                    animateIslandSize(w, h);
-                }, 5000);
+                    // 仅接管成功才安排 5s 后的收起定时器，避免活动展示期间被误收起
+                    if ((window as any).msgTimer) clearTimeout((window as any).msgTimer);
+                    (window as any).msgTimer = setTimeout(() => {
+                        isMsgActive.value = false;
+                        const { w, h } = getBaseSize();
+                        animateIslandSize(w, h);
+                    }, 5000);
+                }
             }
         } catch (err) {
             console.error(err);
@@ -3390,6 +3489,7 @@ onMounted(async () => {
 onUnmounted(() => {
     stopWebSocket();
     stopClipboardPolling();
+    stopActivityPoolListening();
     if (unlistenJustSolo) {
         unlistenJustSolo();
         unlistenJustSolo = null;
@@ -3869,6 +3969,146 @@ onUnmounted(() => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* 灵动岛活动池卡片样式（外部服务经 47300 HTTP 推送） */
+.activity-box {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    box-sizing: border-box;
+    z-index: 10;
+    gap: 12px;
+    -webkit-app-region: no-drag;
+}
+
+.activity-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--activity-accent, rgba(255, 255, 255, 0.16));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--activity-accent, #ffffff);
+    flex-shrink: 0;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.activity-avatar-img {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.activity-fallback-icon {
+    width: 18px;
+    height: 18px;
+}
+
+.activity-text-wrapper {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    overflow: hidden;
+    flex-grow: 1;
+    min-width: 0;
+    gap: 2px;
+}
+
+.activity-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13.5px;
+    font-weight: 700;
+    line-height: 1.3;
+    width: 100%;
+    overflow: hidden;
+    color: #ffffff;
+}
+
+.activity-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 尾部的活动类型徽标 */
+.activity-kind {
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
+    padding: 1px 5px;
+    border-radius: 5px;
+    background-color: rgba(255, 255, 255, 0.22);
+    color: inherit;
+    opacity: 0.9;
+    letter-spacing: 0.2px;
+    transform: translateY(-0.5px);
+}
+
+.activity-subtitle {
+    font-size: 11.5px;
+    line-height: 1.3;
+    opacity: 0.68;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #ffffff;
+}
+
+.activity-progress-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 1px;
+}
+
+.activity-progress-track {
+    flex: 1;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.18);
+    overflow: hidden;
+}
+
+.activity-progress-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--activity-accent, rgba(255, 255, 255, 0.9));
+    transition: width 0.12s linear;
+}
+
+/* 不确定进度：流动动画 */
+.activity-progress-fill.is-indeterminate {
+    width: 34% !important;
+    animation: activity-indeterminate 1.1s ease-in-out infinite;
+}
+
+.activity-progress-text {
+    font-size: 10.5px;
+    font-weight: 600;
+    opacity: 0.8;
+    color: #ffffff;
+    min-width: 30px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+@keyframes activity-indeterminate {
+    from { transform: translateX(-120%); }
+    to { transform: translateX(320%); }
 }
 
 /* 灵动岛剪贴板链接通知卡片样式 */
