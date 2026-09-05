@@ -224,6 +224,43 @@ fn show_window_no_activate(app: tauri::AppHandle, label: String) {
     }
 }
 
+// 动态切换窗口的“不可激活”扩展样式 (WS_EX_NOACTIVATE)。
+// 全屏悬停唤起期间开启：点击灵动岛不再抢占焦点/激活，前台始终留给全屏应用，
+// 从而避免 Windows 因前台变成非全屏小窗而弹出任务栏；退出全屏后恢复可激活。
+#[tauri::command]
+fn set_window_no_activate(app: tauri::AppHandle, label: String, enabled: bool) {
+    if let Some(win) = app.get_webview_window(&label) {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(hwnd) = win.hwnd() {
+                unsafe {
+                    // GetWindowLongPtrW 返回 LONG_PTR，全程按其位宽运算，避免 64 位下截断
+                    let ex_style = winapi::um::winuser::GetWindowLongPtrW(
+                        hwnd.0 as _,
+                        winapi::um::winuser::GWL_EXSTYLE,
+                    );
+                    let no_activate = winapi::um::winuser::WS_EX_NOACTIVATE
+                        as winapi::shared::basetsd::LONG_PTR;
+                    let new_style = if enabled {
+                        ex_style | no_activate
+                    } else {
+                        ex_style & !no_activate
+                    };
+                    winapi::um::winuser::SetWindowLongPtrW(
+                        hwnd.0 as _,
+                        winapi::um::winuser::GWL_EXSTYLE,
+                        new_style,
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (label, enabled);
+        }
+    }
+}
+
 // 新增：底层原子化窗口调整指令，彻底消除位移闪烁
 #[tauri::command]
 fn set_window_bounds(app: tauri::AppHandle, x: i32, y: i32, width: i32, height: i32) {
@@ -747,6 +784,7 @@ pub fn run() {
             set_window_bounds,
             start_island_animation,
             show_window_no_activate,
+            set_window_no_activate,
             toggle_taskbar_plugin,
             sync_to_taskbar,
             audio_spectrum::get_audio_spectrum,

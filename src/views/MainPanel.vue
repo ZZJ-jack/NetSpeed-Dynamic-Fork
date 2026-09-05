@@ -1,6 +1,6 @@
 <template>
     <div class="panel-container">
-        <div v-if="themeMode === 'coverglass'" class="coverglass-bg-container">
+        <div v-if="themeMode === 'coverglass' && !logoCoverActive" class="coverglass-bg-container">
             <div class="coverglass-bg-image" :style="coverUrl ? { backgroundImage: `url(${coverUrl})` } : {}"></div>
             <div class="coverglass-blur-layer"></div>
             <div class="coverglass-noise-layer"></div>
@@ -429,6 +429,16 @@
                                         <span class="slider"></span>
                                     </label>
                                 </div>
+                                <div class="set-item fs-hover-set-item">
+                                    <div class="set-item-meta">
+                                        <span class="set-item-title">{{ t('fullscreenHoverWake') }}</span>
+                                        <span class="set-item-desc">{{ t('fullscreenHoverWakeDesc') }}</span>
+                                    </div>
+                                    <label class="switch">
+                                        <input type="checkbox" v-model="hoverWakeEnabled" @change="toggleHoverWake">
+                                        <span class="slider"></span>
+                                    </label>
+                                </div>
                                 <div class="custom-display-container">
                                     <div class="custom-sub-item top-sub-item">
                                         <div class="set-item-meta">
@@ -573,6 +583,8 @@ const savedTheme = localStorage.getItem('nsd_theme_mode') || 'light';
 const themeMode = ref(['light', 'dark', 'coverglass', 'system'].includes(savedTheme) ? savedTheme : 'light');
 
 const coverUrl = ref('');
+// 当前会话的封面是软件/平台 logo（bilibili / PotPlayer 视频）时置真，禁用沉浸背景渲染
+const logoCoverActive = ref(false);
 const coverCache = new Map<string, string>();
 const currentTrackInfo = ref('');
 let coverTimer: number | null = null;
@@ -852,43 +864,85 @@ const syncMusicCover = async () => {
     // 只有在开启沉浸模式时才请求，节省性能
     if (themeMode.value !== 'coverglass') return;
     try {
-        const res = await invoke<[string, string, boolean] | null>('fetch_netease_music_info');
+        const res = await invoke<[string, string, boolean, number, number, string] | null>('fetch_netease_music_info');
         if (res) {
-            const [song, artist] = res;
+            const [song, artist, , , , appId] = res;
             // SMTC 已连上应用但还没有有效标题时，跳过封面刷新（避免用空标题去联网搜图）
-            if (!song) return;
+            if (!song) {
+                currentTrackInfo.value = '';
+                coverUrl.value = '';
+                logoCoverActive.value = false;
+                return;
+            }
             const newTrackInfo = artist ? `${song} - ${artist}` : song;
+            const artistLower = artist.trim().toLowerCase();
+            const appLower = appId.toLowerCase();
+            const isPotplayerVideo = appLower.includes('potplayer') && artistLower === 'potplayer';
+            // 与灵动岛一致：bilibili / PotPlayer 视频用软件 logo 作封面 → 沉浸背景同步失效
+            const isLogoSession = appLower.includes('bilibili') || isPotplayerVideo;
+            // edge/chrome 无歌手（视频场景）：灵动岛只读 SMTC 本地封面，拿不到就退回 logo → 这里同样只查 SMTC、不联网
+            const isSmtcOnlySession = (appLower.includes('edge') || appLower.includes('chrome'))
+                && (artistLower === 'edge' || artistLower === 'chrome');
+
+            logoCoverActive.value = isLogoSession;
 
             if (currentTrackInfo.value !== newTrackInfo) {
                 currentTrackInfo.value = newTrackInfo;
 
+                if (isLogoSession) {
+                    coverUrl.value = '';
+                    return;
+                }
+
                 // 优先读取缓存
                 if (coverCache.has(newTrackInfo)) {
                     coverUrl.value = coverCache.get(newTrackInfo)!;
-                } else {
+                    return;
+                }
+
+                if (isSmtcOnlySession) {
+                    // 只读 SMTC 本地封面：有则用于背景，没有则留空（此时灵动岛显示 logo，本背景也不应出现）
                     try {
-                        const realCoverUrl = await invoke<string>('get_random_cover_url', {
-                            songName: song,
-                            artistName: artist
-                        });
-
-                        // 等待 Canvas 烘焙完成，拿到一张纯静态的模糊 Base64 图片
-                        const bakedImage = await bakeBlurImage(realCoverUrl);
-
-                        coverUrl.value = bakedImage;
-
-                        if (coverCache.size > 50) coverCache.clear();
-                        // 缓存已生成的静态缩略图，避免下次重复处理
-                        coverCache.set(newTrackInfo, bakedImage);
-                    } catch (coverErr) {
+                        const smtcCover = await invoke<string | null>('get_smtc_cover');
+                        if (smtcCover) {
+                            const baked = await bakeBlurImage(smtcCover);
+                            coverUrl.value = baked;
+                            coverCache.set(newTrackInfo, baked);
+                        } else {
+                            coverUrl.value = '';
+                        }
+                    } catch {
                         coverUrl.value = '';
                     }
+                    return;
                 }
+
+                try {
+                    const realCoverUrl = await invoke<string>('get_random_cover_url', {
+                        songName: song,
+                        artistName: artist
+                    });
+
+                    // 等待 Canvas 烘焙完成，拿到一张纯静态的模糊 Base64 图片
+                    const bakedImage = await bakeBlurImage(realCoverUrl);
+
+                    coverUrl.value = bakedImage;
+
+                    if (coverCache.size > 50) coverCache.clear();
+                    // 缓存已生成的静态缩略图，避免下次重复处理
+                    coverCache.set(newTrackInfo, bakedImage);
+                } catch (coverErr) {
+                    coverUrl.value = '';
+                }
+            } else if (isLogoSession) {
+                // 同一首歌进入 logo 会话时，确保清空可能残留的背景
+                coverUrl.value = '';
             }
         } else {
             // 没检测到播放时清空封面
             currentTrackInfo.value = '';
             coverUrl.value = '';
+            logoCoverActive.value = false;
         }
     } catch (err) {
         console.error('沉浸模式封面同步失败:', err);
@@ -1011,6 +1065,15 @@ const toggleDynamicSet = () => {
 const toggleAutoHide = async () => {
     localStorage.setItem('nsd_autohide_fs', String(autoHideFullscreen.value));
     await emit('control-autohide-fs', { enabled: autoHideFullscreen.value });
+};
+
+// 全屏隐藏时的“鼠标悬停唤出”开关（默认关闭，需手动开启；仅在“全屏自动隐藏”开启时有意义）
+const hoverWakeEnabled = ref(localStorage.getItem('nsd_autohide_fs_hover') === 'true');
+
+// 切换悬停唤出
+const toggleHoverWake = async () => {
+    localStorage.setItem('nsd_autohide_fs_hover', String(hoverWakeEnabled.value));
+    await emit('control-autohide-fs-hover', { enabled: hoverWakeEnabled.value });
 };
 
 // 切换灵动岛设置时，更新图表
@@ -2968,6 +3031,12 @@ input:disabled+.slider {
 /* 剪贴板读取开关：一个选项一个方块，固定在系统资源监控正下方的那一格 */
 .clipboard-set-item {
     grid-column: 1;
+    grid-row: 2;
+}
+
+/* 全屏悬停唤出开关：固定在剪贴板开关正右方的空格（第2行第2列） */
+.fs-hover-set-item {
+    grid-column: 2;
     grid-row: 2;
 }
 
