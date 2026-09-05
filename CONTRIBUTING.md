@@ -21,12 +21,12 @@
 
 在创建新 Issue 前，**请先搜索已有 Issues**，避免重复提交。
 
-*   **报告 Bug**：请使用我们提供的 [Bug 报告模板](.github/ISSUE_TEMPLATE/bug-report.yml)（如果已配置），并尽量提供：
+*   **报告 Bug**：请使用我们提供的 [Bug 报告模板](.github/ISSUE_TEMPLATE/bug-report.yml)，并尽量提供：
     *   操作系统版本（Windows 10/11）
     *   应用版本号
     *   详细的复现步骤
     *   相关的日志或截图
-*   **提出功能建议**：请使用 [功能建议模板](.github/ISSUE_TEMPLATE/feature-request.yml)（如果已配置），清晰描述：
+*   **提出功能建议**：请使用 [功能建议模板](.github/ISSUE_TEMPLATE/feature-request.yml)，清晰描述：
     *   你遇到了什么痛点
     *   你期望的解决方案
     *   是否有替代方案

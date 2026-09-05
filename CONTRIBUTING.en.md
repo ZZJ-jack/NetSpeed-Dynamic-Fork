@@ -21,12 +21,12 @@ Please take a few minutes to read the following guide. It will make your contrib
 
 Before creating a new Issue, **please search existing Issues** to avoid duplicates.
 
-- **Reporting a Bug**: Please use our [Bug Report template](.github/ISSUE_TEMPLATE/bug-report.yml) (if configured) and provide as much detail as possible:
+- **Reporting a Bug**: Please use our [Bug Report template](.github/ISSUE_TEMPLATE/bug-report.yml) and provide as much detail as possible:
   - Operating system version (Windows 10/11)
   - Application version number
   - Detailed steps to reproduce
   - Relevant logs or screenshots
-- **Suggesting a Feature**: Please use our [Feature Request template](.github/ISSUE_TEMPLATE/feature-request.yml) (if configured) and clearly describe:
+- **Suggesting a Feature**: Please use our [Feature Request template](.github/ISSUE_TEMPLATE/feature-request.yml) and clearly describe:
   - The pain point you encountered
   - Your expected solution
   - Any alternative approaches you have considered
