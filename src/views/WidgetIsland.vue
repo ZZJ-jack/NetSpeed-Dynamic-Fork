@@ -355,27 +355,31 @@ watch(isIslandVisible, (visible) => {
 
 // 记录全屏自动隐藏开关状态
 const isAutoHideEnabled = ref(localStorage.getItem('nsd_autohide_fs') === 'true');
+// 全屏隐藏后是否允许“鼠标悬停原位唤出”（默认关闭，需在设置中手动开启）
+const fsHoverWakeEnabled = ref(localStorage.getItem('nsd_autohide_fs_hover') === 'true');
 // 记录进入全屏前的灵动岛显隐状态，用来决定退回桌面时要不要恢复
 let wasVisibleBeforeFullscreen = false;
 
 // ==================== 全屏“悬停唤起”机制 ====================
-// 开启“全屏自动隐藏”后，灵动岛在全屏时会被收起。为方便随时瞄一眼，
-// 隐藏期间改用一个 1×1 的常驻小窗口（配合鼠标透传，视觉不可见也不挡任何点击），
-// 前端以固定频率轮询“全局光标位置”：鼠标一回到岛的原位就亮起灵动岛，
-// 移开 3 秒后再收起，回到可再次唤起的待命状态。
-let fsHoverActive = false; // 当前是否处于“已隐藏、可悬停唤起”的待命状态
-let fsHoverSlot: { x: number; y: number; w: number; h: number } | null = null; // 隐藏前岛体的物理区域，即唤醒探测区
-let fsHoverPollTimer: number | null = null; // 光标轮询定时器
-let fsHoverHideTimer: number | null = null; // “光标已移开 → 3s 后收起”倒计时
-let fsHoverAwaitExit = false; // 刚隐藏时光标可能正停在原位：先等它离开一次，避免一进全屏又立刻弹出
-let fsHoverTicking = false; // 轮询去重（tick 内有 await，防止并发重叠）
-const FS_HOVER_PAD = 18; // 触发区在岛体外扩的逻辑像素（缓解边缘抖动）
-const FS_HOVER_POLL_MS = 120; // 光标轮询间隔
-const FS_HOVER_LEAVE_MS = 2000; // 光标离开原位后再次收起的延迟
+// 开启“全屏自动隐藏”后，进入全屏时灵动岛会收起。为便于随时查看，
+// 收起期间把窗口缩成 1×1 的常驻窗口（配合鼠标透传，视觉不可见且不拦截点击），
+// 并按固定频率轮询全局光标位置：光标回到岛的原位置时恢复显示，
+// 光标离开该位置超过 FS_HOVER_LEAVE_MS 后再收起，等待下一次唤起。
+let fsHoverActive = false; // 是否处于“已收起、等待悬停唤起”状态
+let fsHoverSlot: { x: number; y: number; w: number; h: number } | null = null; // 隐藏前记录的岛体物理区域，作为唤起探测区
+let lastRealFsHoverSlot: { x: number; y: number; w: number; h: number } | null = null; // 最近一次取得的真实探测区（停止逻辑不会清空它），供 1×1 待命态下重新开启悬停时定位
+let fsHoverPollTimer: number | null = null; // 光标轮询定时器句柄
+let fsHoverHideTimer: number | null = null; // 光标离开后的收起倒计时句柄
+let fsHoverAwaitExit = false; // 收起瞬间光标可能仍停在原位，需先离开一次才能再次唤起，避免进入全屏立即弹出
+let fsHoverTicking = false; // 轮询去重：tick 内含 await，防止并发重叠
+const FS_HOVER_PAD = 18; // 唤起触发区相对岛体四边的外扩像素，减少边缘抖动引起的反复收起/唤出
+const FS_HOVER_POLL_MS = 120; // 光标轮询间隔（毫秒）
+const FS_HOVER_LEAVE_MS = 1000; // 光标离开触发区后再次收起的延迟（毫秒）
 
-// 捕获岛体当前占据的物理屏幕区域（隐藏前记录、亮起期间持续刷新）。
-// innerPosition/innerSize 在个别窗口状态下会失败，逐级回退到 outer*，
-// 最后再用“个性化尺寸 + 显示器”反推顶部居中的合成区域，保证唤醒区永不落空。
+// 记录岛体当前在屏幕上占用的物理区域（隐藏前记录；岛可见期间随位置/尺寸变化实时刷新）。
+// 读取窗口内边距坐标/尺寸失败时，依次回退到外边距坐标/尺寸；
+// 若仍不可用（例如窗口处于 1×1 隐藏态），先使用最近一次真实区域，
+// 最终按“个性化尺寸 + 所在显示器”反推岛默认贴靠位置（显示器顶部居中）作为唤起区。
 const captureFsHoverSlot = async () => {
     const appWindow = getCurrentWindow();
     let x: number | null = null, y: number | null = null, w: number | null = null, h: number | null = null;
@@ -388,16 +392,23 @@ const captureFsHoverSlot = async () => {
             const [pos, size] = await Promise.all([appWindow.outerPosition(), appWindow.outerSize()]);
             x = pos.x; y = pos.y; w = size.width; h = size.height;
         } catch (e2) {
-            console.error('[fsHover] outer* 也失败，改用顶部居中合成区域', e2);
+            console.error('[fsHover] innerPosition/outerPosition 均失败，将改用最近真实区域或合成区域', e2);
         }
     }
-    // 结果可信才直接用；尺寸异常（≤2px，例如仍处于 1×1）时也走合成兜底
+    // 宽高 > 2px 才视为有效区域并记录；尺寸异常（如 1×1 隐藏态）时，
+    // 优先复用最近一次真实区域，否则进入下方合成区域
     if (x != null && y != null && w != null && h != null && w > 2 && h > 2) {
-        fsHoverSlot = { x, y, w, h };
+        const rect = { x, y, w, h };
+        fsHoverSlot = rect;
+        lastRealFsHoverSlot = rect;
+        return;
+    }
+    if (lastRealFsHoverSlot) {
+        fsHoverSlot = lastRealFsHoverSlot;
         return;
     }
     try {
-        // 合成兜底：与 adjustWindowPosition 同款公式 —— 岛默认贴在主显示器顶部居中
+        // 合成区域：与 adjustWindowPosition 使用相同定位公式 —— 岛默认贴靠所在显示器顶部居中
         let monitor = await currentMonitor();
         if (!monitor) {
             const monitors = await availableMonitors();
@@ -429,39 +440,41 @@ const isCursorInsideFsHoverZone = async (rect: { x: number; y: number; w: number
     }
 };
 
-// 悬停唤起：光靠翻转 v-show 看不见岛——收起时 OS 窗口已被缩成 1×1，
-// 且很可能被全屏应用盖在下面。必须先按“个性化设置”的岛大小恢复窗口
-// 尺寸/位置，再压回最顶，等透明窗口挂载好后才撕开入场动画。
+// 悬停唤起：仅切换 v-show 无法让岛显示——收起时窗口已被缩成 1×1，
+// 且可能被全屏应用压在下方。因此先按“个性化设置”的岛尺寸恢复窗口大小，
+// 再显示并置顶窗口，最后触发入场动画让内容出现。
 const raiseFsHoverIsland = async () => {
     const appWindow = getCurrentWindow();
-    // 1. 按个性化尺寸恢复：逻辑宽高(getBaseSize) × appScale(应用缩放) × DPR(系统缩放)
+    // 1. 按个性化设置恢复窗口尺寸：物理像素 = 逻辑宽高(getBaseSize) × 应用缩放(appScale) × 系统缩放(DPR)
     const { w, h } = getBaseSize();
     const scaleFactor = window.devicePixelRatio || 1;
     try {
-        // 只恢复尺寸即可：1×1 收缩时窗口左上角从未移动，原位自动保持
+        // 仅恢复尺寸即可：缩成 1×1 时窗口左上角位置保持不变，原显示位置自动保留
         await appWindow.setSize(new PhysicalSize(
             Math.ceil(w * appScale.value * scaleFactor),
             Math.ceil(h * appScale.value * scaleFactor)
         ));
     } catch (e) { console.error('[fsHover] 恢复尺寸失败', e); }
-    // 2. 显示窗口并重新压回最顶（全屏应用可能把待命的 1×1 窗口盖在下面）
+    // 2. 显示窗口并重新置顶（待命的 1×1 窗口可能被全屏应用盖在底层）
     try {
         await invoke('show_window_no_activate', { label: 'widget' });
         await appWindow.setAlwaysOnTop(true);
+        // 置为“不可激活”：点击岛不抢占焦点，前台始终留给全屏应用，避免任务栏弹出
+        await invoke('set_window_no_activate', { label: 'widget', enabled: true });
     } catch (e) { console.error('[fsHover] 置顶失败', e); }
-    // 3. 等待 40ms 让透明窗口先挂载好，再拉开 v-show（与手动亮岛流程一致，防止闪烁）
+    // 3. 等待 40ms 让透明窗口完成挂载，再切换 v-show 触发入场动画（与手动亮岛流程一致，防止闪烁）
     await new Promise((resolve) => setTimeout(resolve, 40));
     if (fsHoverActive && !isIslandVisible.value) {
         isIslandVisible.value = true;
     }
 };
 
-// 悬停唤起循环：每次 tick 拉取一次全局光标位置
+// 悬停唤起主循环：每次 tick 读取一次全局光标位置，据此决定唤起或收起
 const fsHoverTick = async () => {
     if (!fsHoverActive || fsHoverTicking) return;
     fsHoverTicking = true;
     try {
-        // 岛体亮着时用实时窗口区域探测（跟随展开/拖拽），收起时退回隐藏前记录的槽位
+        // 岛可见时用实时窗口区域探测（跟随展开/拖拽变化）；岛隐藏时使用隐藏前记录的探测区
         if (isIslandVisible.value) {
             await captureFsHoverSlot();
         }
@@ -471,9 +484,9 @@ const fsHoverTick = async () => {
         const inside = await isCursorInsideFsHoverZone(rect);
 
         if (inside) {
-            // 从收起那一刻起光标一直没离开过原位 → 暂不唤起，等它先走开
+            // 光标在收起后从未离开过原位，本次先不唤起，等待它先离开一次
             if (fsHoverAwaitExit) return;
-            // 光标在岛位：取消正在等待的收起，若已收起则按个性化尺寸恢复窗口并亮起
+            // 光标位于探测区内：取消未触发的收起倒计时；岛已收起则按个性化尺寸恢复并显示
             if (fsHoverHideTimer) {
                 clearTimeout(fsHoverHideTimer);
                 fsHoverHideTimer = null;
@@ -483,12 +496,12 @@ const fsHoverTick = async () => {
             }
         } else {
             fsHoverAwaitExit = false; // 光标已离开过原位，下次进入即可唤起
-            // 光标不在岛位且岛体亮着 → 启动 3 秒离开倒计时
+            // 光标已离开探测区且岛仍可见 → 启动收起倒计时（FS_HOVER_LEAVE_MS 后执行）
             if (isIslandVisible.value && fsHoverHideTimer == null) {
                 fsHoverHideTimer = window.setTimeout(() => {
                     fsHoverHideTimer = null;
                     if (fsHoverActive && isIslandVisible.value) {
-                        isIslandVisible.value = false; // watch 会开透传并缩回 1×1，回到待命状态
+                        isIslandVisible.value = false; // watch 会开启鼠标透传并缩回 1×1，回到待命状态
                     }
                 }, FS_HOVER_LEAVE_MS);
             }
@@ -498,23 +511,26 @@ const fsHoverTick = async () => {
     }
 };
 
-// 进入“全屏收起 + 悬停唤起”待命状态
+// 进入“收起 + 悬停唤起”待命状态：隐藏岛体并开始轮询光标
 const startFsHoverMode = async () => {
     if (fsHoverActive) return;
     fsHoverActive = true;
-    await captureFsHoverSlot(); // 必须在缩成 1×1 之前记录原位
+    await captureFsHoverSlot(); // 必须在缩成 1×1 之前记录当前探测区域
 
-    // 收起内容（保留正常离场动画；不做物理 hide，保持窗口“可见”以免 WebView 后台节流定时器）
+    // 收起岛体（保留正常离场动画；不隐藏窗口，仅保持“可见”，避免 WebView 后台定时器被系统节流）
     fsHoverAwaitExit = true;
     isIslandVisible.value = false;
 
     if (fsHoverHideTimer) { clearTimeout(fsHoverHideTimer); fsHoverHideTimer = null; }
-    if (fsHoverPollTimer == null) {
-        fsHoverPollTimer = window.setInterval(fsHoverTick, FS_HOVER_POLL_MS);
+    // 防御性清理：若残留旧轮询定时器（正常情况下 stopFsHoverMode 会将其置空），先清除再重建，避免产生重叠定时器
+    if (fsHoverPollTimer != null) {
+        clearInterval(fsHoverPollTimer);
+        fsHoverPollTimer = null;
     }
+    fsHoverPollTimer = window.setInterval(fsHoverTick, FS_HOVER_POLL_MS);
 };
 
-// 退出“全屏悬停唤起”，清理全部定时器
+// 退出“收起 + 悬停唤起”待命状态：停止轮询并清理相关定时器
 const stopFsHoverMode = () => {
     fsHoverActive = false;
     if (fsHoverPollTimer != null) {
@@ -526,6 +542,8 @@ const stopFsHoverMode = () => {
         fsHoverHideTimer = null;
     }
     fsHoverSlot = null;
+    // 解除“不可激活”样式，恢复桌面上的正常点击/聚焦行为
+    invoke('set_window_no_activate', { label: 'widget', enabled: false }).catch(() => { });
 };
 
 // 记录当前是否显示上行网速（用于轮换）
@@ -741,7 +759,7 @@ const islandStyle = computed<CSSProperties>(() => {
         bg = `rgba(255, 255, 255, ${alpha})`;
         color = '#000000';
     } else if (showCoverglassBg.value) {
-        // 关键修改：使用 showCoverglassBg.value 替换原判断
+        // coverglass 主题（沉浸背景启用）时，外层使用深色半透明底色，实际画面由沉浸背景层提供
         bg = `rgba(20, 20, 20, ${alpha})`;
     }
 
@@ -765,7 +783,7 @@ const coreContentStyle = computed(() => {
     if (islandTheme.value === 'white') {
         return { backgroundColor: `rgba(255, 255, 255, ${alpha})`, borderRadius: innerRadius };
     } else if (showCoverglassBg.value) {
-        // 关键修改：使用 showCoverglassBg.value 替换原判断
+        // coverglass 主题时内层透明，让沉浸背景层直接透出
         return { backgroundColor: `transparent`, borderRadius: innerRadius };
     }
     return { backgroundColor: `rgba(0, 0, 0, ${alpha})`, borderRadius: innerRadius };
@@ -1253,19 +1271,27 @@ const scheduleCoverRetry = (trackInfo: string) => {
     }, COVER_RETRY_MS);
 };
 
-// 浏览器 logo 兜底：设置默认图标 + 清空上首歌残留的模糊封面 + 删除当前曲目缓存（供重试强制重拉）
-// 音乐/视频模式统一入口：SMTC 或网络封面没拿到时都回退到默认图标，并排一次重试
-const fallbackBrowserLogo = (appIdStr: string, trackInfo: string) => {
-    // 若当前显示的真实封面是本首歌开始后拉到的（非占位、且应用时刻晚于切歌时刻），说明音乐封面已就绪，
-    // 不再回退默认图标——否则慢路径（isNewTrack 的 SMTC 重试循环约 3s 才走完）会在真实封面之后
-    // 又把封面盖成 edge/chrome 图标（"先音乐封面后 edge 图标"的闪跳）
-    if (!isCoverPlaceholder(coverUrl.value) && lastRealCoverApplyTime >= songChangeTime) {
-        return;
-    }
-    coverUrl.value = APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"];
+// 统一设置“logo 封面”：凡需要把软件/平台 logo 当作封面时都调用本函数。
+// 除了替换前景封面外，同时复位 SMTC 封面标记、清空沉浸模糊背景及对应缓存，
+// 避免切到 logo 封面后残留上一首真实封面的模糊背景（coverglass 背景与前景不一致）。
+const applyLogoCover = (logoUrl: string, trackInfo: string) => {
+    coverUrl.value = logoUrl;
+    isSmtcCoverActive.value = false;
     blurredCoverUrl.value = '';
     blurredCoverCache.delete(trackInfo);
     coverCache.delete(trackInfo);
+};
+
+// 浏览器音乐/视频模式：未取得真实封面（SMTC 或网络）时统一退回浏览器 logo 封面，
+// 并定时重试拉取真实封面（成功后自动替换 logo）
+const fallbackBrowserLogo = (appIdStr: string, trackInfo: string) => {
+    // 若当前显示的真实封面在本首歌开始后才应用（非占位、时刻晚于切歌时刻），说明封面已就绪，
+    // 不再退回 logo——否则慢路径（isNewTrack 的 SMTC 重试循环约 3s 才结束）会在真实封面之后
+    // 又把封面替换成 edge/chrome 图标，出现"先音乐封面后 edge 图标"的闪跳
+    if (!isCoverPlaceholder(coverUrl.value) && lastRealCoverApplyTime >= songChangeTime) {
+        return;
+    }
+    applyLogoCover(APP_COVER_LOGO_MAP[appIdStr.includes("edge") ? "edge" : "chrome"], trackInfo);
     scheduleCoverRetry(trackInfo);
 };
 
@@ -1287,11 +1313,9 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
     const isBilibili = appIdStr.includes("bilibili");
     const isJustSolo = appIdStr.includes("justsolo");
 
-    // PotPlayer 视频模式：使用 logo，并清空模糊封面，防止 coverglass 背景残留上一首歌
+    // PotPlayer 视频模式：统一使用 logo 封面（无歌手元数据说明播放的是视频）
     if (isPotplayerVideo) {
-        coverUrl.value = potplayerLogo;
-        blurredCoverUrl.value = '';
-        isSmtcCoverActive.value = false;
+        applyLogoCover(potplayerLogo, trackInfo);
         return;
     }
 
@@ -1326,9 +1350,9 @@ const applyCoverForApp = async (trackInfo: string, song: string, artist: string,
         return;
     }
 
-    // bilibili：固定 logo 封面
+    // bilibili：统一使用固定 logo 封面
     if (isBilibili) {
-        coverUrl.value = bilibiliLogo;
+        applyLogoCover(bilibiliLogo, trackInfo);
         return;
     }
 
@@ -1606,12 +1630,15 @@ watch(shouldShowInQuietMode, async (newVal) => {
 
 // 沉浸背景的独立存活逻辑
 // 只要媒体活跃且未被消息弹窗占用，背景就一直存在，即使正在显示系统通知
+// 前景封面是软件/平台 logo（非真实专辑封面）时全局禁用：logo 用于模糊背景无意义，
+// 也可避免残留的旧模糊封面在切到 logo 封面后继续渲染
 const showCoverglassBg = computed(() => {
     return islandTheme.value === 'coverglass' &&
         isMusicCtlEnabled.value &&
         isMediaActive.value &&
         !isMsgActive.value &&
-        blurredCoverUrl.value;
+        blurredCoverUrl.value &&
+        !APP_COVER_LOGOS.includes(coverUrl.value);
 });
 
 // 辅助函数：获取当前状态应该拥有的默认大小
@@ -2980,11 +3007,12 @@ onMounted(async () => {
         currentLanguage.value = event.payload.language;
     });
 
-    // 监听控制台发来的“自动隐藏”配置变更
+    // 监听控制台发来的“全屏自动隐藏”配置变更
     await listen<{ enabled: boolean }>('control-autohide-fs', async (event) => {
         isAutoHideEnabled.value = event.payload.enabled;
-        // 全屏待命期间若用户关闭“全屏自动隐藏”，应立即把岛恢复出来
-        if (!event.payload.enabled && fsHoverActive && wasVisibleBeforeFullscreen) {
+        // 全屏期间若用户关闭“全屏自动隐藏”，应立即把岛恢复显示；
+        // 不区分是否处于悬停唤起待命（悬停唤出被关闭时的“仅隐藏”路径同样适用）
+        if (!event.payload.enabled && wasVisibleBeforeFullscreen) {
             stopFsHoverMode();
             wasVisibleBeforeFullscreen = false;
             await invoke('show_window_no_activate', { label: 'widget' });
@@ -2994,32 +3022,58 @@ onMounted(async () => {
         }
     });
 
+    // 监听控制台发来的“全屏隐藏悬停唤出”配置变更
+    await listen<{ enabled: boolean }>('control-autohide-fs-hover', async (event) => {
+        fsHoverWakeEnabled.value = event.payload.enabled;
+        if (event.payload.enabled) {
+            // 全屏隐藏期间重新开启悬停：从“仅隐藏”状态恢复到可悬停唤起的待命状态
+            if (isAutoHideEnabled.value && wasVisibleBeforeFullscreen && !fsHoverActive) {
+                await startFsHoverMode();
+            }
+        } else if (fsHoverActive && wasVisibleBeforeFullscreen) {
+            // 关闭悬停唤出：若岛正在全屏中显示则立即收起，若已隐藏则保持隐藏；
+            // 两种情形都停止轮询，退出全屏后再按进入前的状态恢复
+            if (isIslandVisible.value) {
+                isIslandVisible.value = false;
+            }
+            stopFsHoverMode();
+        }
+    });
+
     // 监听 Rust 发来的系统级全屏状态变化
     await listen<boolean>('fullscreen-changed', async (event) => {
         const isFullscreen = event.payload;
 
-        // 未开启该功能时直接忽略
+        // 未开启“全屏自动隐藏”时直接忽略
         if (!isAutoHideEnabled.value) return;
 
         if (isFullscreen) {
-            // 检测到全屏：若灵动岛当前显示，则收起并进入“悬停唤起”待命
+            // 检测到进入全屏：若灵动岛当前可见则收起
             if (isIslandVisible.value) {
                 wasVisibleBeforeFullscreen = true;
-                await startFsHoverMode();
+                if (fsHoverWakeEnabled.value) {
+                    // 已开启悬停唤出：进入“收起 + 可悬停唤起”的待命状态
+                    await startFsHoverMode();
+                } else {
+                    // 未开启悬停唤出：仅收起并保持隐藏直至退出全屏
+                    // （先记录探测区域位置，便于全屏期间重新开启悬停时仍能准确定位）
+                    await captureFsHoverSlot();
+                    isIslandVisible.value = false;
+                }
             }
         } else {
-            // 退出全屏：先退出悬停待命（清掉轮询与 3s 倒计时），再按进全屏前的状态恢复
+            // 退出全屏：先退出悬停待命（停止光标轮询与相关定时器），再按进入全屏前的状态恢复
             const needRestore = wasVisibleBeforeFullscreen;
             stopFsHoverMode();
             if (needRestore) {
                 await invoke('show_window_no_activate', { label: 'widget' });
 
-                // 等待 40ms 让透明窗口先挂载好，再拉开幕布，防止闪烁
+                // 等待 40ms 让透明窗口完成挂载，再切换 v-show 触发入场动画，防止闪烁
                 setTimeout(() => {
                     isIslandVisible.value = true;
                 }, 40);
 
-                wasVisibleBeforeFullscreen = false; // 销案
+                wasVisibleBeforeFullscreen = false; // 恢复动作已完成，清除标记
             }
         }
     });
@@ -3044,7 +3098,7 @@ onMounted(async () => {
         // 第二步：位置就绪后，再让透明的 OS 窗口容器显示
         await invoke('show_window_no_activate', { label: 'widget' });
         
-        // 第三步：打开视觉幕布，绝不会再在左上角闪烁
+        // 第三步：切换 v-show 显示岛体内容（窗口此前已显示且定位完成，不会在左上角闪烁）
         isIslandVisible.value = true;
 
         // 延时加固：防止某些显示器的 DPI 汇报过慢，0.5秒后再居中夯实一次
@@ -3210,12 +3264,12 @@ onMounted(async () => {
     // 监听控制台发来的显隐调度指令
     await listen<{ show: boolean }>('control-island-visibility', async (event) => {
         if (event.payload.show) {
-            // 手动强制点亮：退出全屏悬停待命，让岛保持常亮不被 3s 逻辑收回
+            // 手动强制点亮：退出全屏悬停待命，让岛保持常亮，不被 FS_HOVER_LEAVE_MS 收起倒计时收回
             stopFsHoverMode();
             // 1. 先让透明的 OS 窗口容器显示，此时内部 DOM 为 v-show="false"，视觉上仍是隐形的
             await invoke('show_window_no_activate', { label: 'widget' });
             await getCurrentWindow().setAlwaysOnTop(true);
-            // 2. 给予 40ms 的浏览器渲染帧缓冲，再撕开 Vue 的 v-show 状态，强制触发 enter 动画
+            // 2. 给予 40ms 的浏览器渲染帧缓冲，再切换 v-show 触发入场动画
             setTimeout(() => {
                 isIslandVisible.value = true;
             }, 40);
