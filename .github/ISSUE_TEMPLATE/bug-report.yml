@@ -1,0 +1,47 @@
+name: 反馈Bug / Bug Report
+description: 提交一个Bug报告，帮助我们改进
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "## 感谢反馈，请仔细填写以下信息"
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请清晰、简洁地描述这个Bug是什么
+      placeholder: 例如：当我点击提交按钮时，页面报错...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请按顺序写出复现这个问题的步骤
+      placeholder: |
+        1. 打开软件
+        2. 当收到信息
+        3. 灵动岛上没有显示信息
+      value: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 你原本期望发生什么？
+      placeholder: 例如：应该正常在灵动岛上显示信息
+
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      description: 比如操作系统版本、软件版本等
+      placeholder: Windows 11 25H2， NetSpeed Dynamic v2.4.5

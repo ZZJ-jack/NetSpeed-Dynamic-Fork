@@ -1,0 +1,78 @@
+name: 功能建议 / Feature Request
+description: 为项目提出一个新功能或优化建议
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 感谢你的建议！
+        请尽可能详细地填写以下信息，这能帮助开发者快速理解你的需求。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 这个功能是为了解决什么问题？(背景/痛点)
+      description: 请描述你在使用过程中遇到的麻烦，或者当前流程中不顺畅的地方。
+      placeholder: 例如：目前每次复制文本，如果其中有链接，无法在灵动岛上显示...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你期望的解决方案是什么？
+      description: 请清晰地描述你希望功能具体如何运作。
+      placeholder: 例如：希望增加一个检测到复制操作，自动识别文本中的链接，将其显示在灵动岛上，并支持点击跳转...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你考虑过的替代方案
+      description: 如果暂时无法实现上述方案，有没有变通的办法或兜底逻辑？
+      placeholder: 例如：网易云音乐的播放进度条读取不准确，能否外挂一个插件来解决这个问题？
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准 (成功的定义)
+      description: 如果你能定义，请告诉我们如何才能判定这个功能是“完成且好用”的？
+      placeholder: |
+        例如：
+        - [ ] 自动识别文本中的链接
+        - [ ] 支持点击跳转链接
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: 当前使用的版本
+      description: 你正在使用的项目版本号
+      placeholder: 例如 v2.4.5 或 main 分支最新提交
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 补充信息 (截图 / 日志 / 参考链接)
+      description: 如果有相关的截图、报错日志或参考了其他项目类似的实现，请贴在这里。
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 提交前确认
+      description: 在提交前，请确认你已经做了以下检查
+      options:
+        - label: 我已搜索过现有的 Issues，确认没有重复请求此功能
+          required: true
+        - label: 我已阅读过项目的贡献指南
+          required: false
