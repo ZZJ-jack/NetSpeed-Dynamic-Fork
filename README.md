@@ -133,6 +133,8 @@ NetSpeed-Dynamic/
 ├── package.json                   # 前端依赖与脚本
 ├── README.md                      # 中文说明
 ├── README.en.md                   # 英文说明
+├── CONTRIBUTING.md                # 贡献指南
+├── CONTRIBUTING.en.md             # 英文贡献指南
 ├── LICENSE                        # MIT License
 └── .github/                       # GitHub 工作流与 Star 历史资源
 ```
