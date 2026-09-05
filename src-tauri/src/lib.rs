@@ -1,3 +1,4 @@
+mod activity_pool;
 mod audio_spectrum;
 mod music_controller;
 mod notification;
@@ -803,6 +804,9 @@ pub fn run() {
             get_active_browser_tabs,
         ])
         .setup(|app| {
+            // 活动池：47300 HTTP 入站 + 30Hz 节流推送（需尽早启动，供外部随时调用）
+            activity_pool::start(app.handle().clone());
+
             audio_spectrum::start_monitor();
             system_events::start_monitor(app.handle().clone());
             // 启动剪贴板变更监听（事件驱动，复制时实时推送）
